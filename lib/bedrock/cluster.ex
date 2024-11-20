@@ -6,7 +6,7 @@ defmodule Bedrock.Cluster do
   alias Bedrock.ControlPlane.Coordinator
   alias Bedrock.DataPlane.Log
   alias Bedrock.DataPlane.Storage
-  alias Bedrock.DataPlane.Transaction
+  alias Bedrock.DataPlane.Log.Transaction
 
   require Logger
 

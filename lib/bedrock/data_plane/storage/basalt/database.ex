@@ -5,7 +5,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Database do
   alias Bedrock.DataPlane.Storage.Basalt.PersistentKeyValues
   alias Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl, as: MVCC
   alias Bedrock.DataPlane.Storage.Basalt.Keyspace
-  alias Bedrock.DataPlane.Transaction
+  alias Bedrock.DataPlane.Log.Transaction
   alias Bedrock.DataPlane.Version
 
   @opaque t :: %__MODULE__{

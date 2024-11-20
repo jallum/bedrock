@@ -1,7 +1,7 @@
-defmodule Bedrock.DataPlane.TransactionTest do
+defmodule Bedrock.DataPlane.Log.TransactionTest do
   use ExUnit.Case, async: true
 
-  alias Bedrock.DataPlane.Transaction
+  alias Bedrock.DataPlane.Log.Transaction
 
   describe "new/1" do
     test "creates a new transaction" do

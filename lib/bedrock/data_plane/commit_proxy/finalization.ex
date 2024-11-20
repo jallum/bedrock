@@ -5,8 +5,8 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
   alias Bedrock.DataPlane.CommitProxy.Batch
   alias Bedrock.DataPlane.Log
   alias Bedrock.DataPlane.Log.EncodedTransaction
+  alias Bedrock.DataPlane.Log.Transaction
   alias Bedrock.DataPlane.Resolver
-  alias Bedrock.DataPlane.Transaction
   alias Bedrock.Service.Worker
 
   import Bedrock.DataPlane.CommitProxy.Batch,
@@ -190,6 +190,7 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
         majority_reached
       ) do
     commit_version = Transaction.version(transaction)
+    encoded_transacton = EncodedTransaction.encode(transaction)
 
     log_descriptors = transaction_system_layout.logs
     n = map_size(log_descriptors)
@@ -199,10 +200,10 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
     |> resolve_log_descriptors(transaction_system_layout.services)
     |> Task.async_stream(
       fn {log_id, service_descriptor} ->
-        encoded_transacton = EncodedTransaction.encode(transaction)
-
         service_descriptor
         |> try_to_push_transaction_to_log(encoded_transacton, last_commit_version)
+
+        :ok
         |> then(&{log_id, &1})
       end,
       timeout: 5_000
@@ -240,7 +241,11 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
     |> Map.new()
   end
 
-  @spec try_to_push_transaction_to_log(ServiceDescriptor.t(), Transaction.t(), Bedrock.version()) ::
+  @spec try_to_push_transaction_to_log(
+          ServiceDescriptor.t(),
+          EncodedTransaction.t(),
+          Bedrock.version()
+        ) ::
           :ok | {:error, :unavailable}
   def try_to_push_transaction_to_log(
         %{kind: :log, status: {:up, log_server}},

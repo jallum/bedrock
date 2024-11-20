@@ -2,7 +2,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.PersistentKeyValues do
   @moduledoc """
   """
 
-  alias Bedrock.DataPlane.Transaction
+  alias Bedrock.DataPlane.Log.Transaction
 
   @opaque t :: :dets.tab_name()
 

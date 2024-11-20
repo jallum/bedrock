@@ -11,7 +11,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Keyspace do
   of the insert operation).
   """
 
-  alias Bedrock.DataPlane.Transaction
+  alias Bedrock.DataPlane.Log.Transaction
 
   @opaque t :: :ets.tid()
 

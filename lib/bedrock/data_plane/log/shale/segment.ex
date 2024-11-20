@@ -23,8 +23,6 @@ defmodule Bedrock.DataPlane.Log.Shale.Segment do
   def decode_file_name(@wal_prefix <> log_number),
     do: log_number |> String.to_integer(32)
 
-  @spec allocate_from_recycler(SegmentRecycler.server(), String.t(), Bedrock.version()) ::
-          {:ok, t()} | {:error, term()}
   def allocate_from_recycler(segment_recycler, path, version) do
     with path_to_file <- Path.join(path, encode_file_name(version)),
          :ok <- SegmentRecycler.check_out(segment_recycler, path_to_file) do
@@ -54,21 +52,21 @@ defmodule Bedrock.DataPlane.Log.Shale.Segment do
     end
   end
 
-  @spec load_transactions(t()) :: {:ok, t()} | {:error, String.t()}
+  @spec load_transactions(t()) :: t()
   def load_transactions(%{transactions: nil} = segment) do
     TransactionStreams.from_file!(segment.path)
     |> Enum.reverse()
     |> case do
       [{:corrupted, offset} | transactions] ->
         "Corrupted segment at offset #{offset}"
-        {:ok, %{segment | transactions: transactions}}
+        %{segment | transactions: transactions}
 
       transactions ->
-        {:ok, %{segment | transactions: transactions}}
+        %{segment | transactions: transactions}
     end
   end
 
-  def load_transactions(segment), do: {:ok, segment}
+  def load_transactions(segment), do: segment
 
   def last_version(%{transactions: [<<version::unsigned-big-64, _::binary>> | _]}), do: version
   def last_version(%{min_version: min_version}), do: min_version

@@ -5,7 +5,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl do
   provides an implementation of MVCC for Basalt.
   """
 
-  alias Bedrock.DataPlane.Transaction
+  alias Bedrock.DataPlane.Log.Transaction
 
   @opaque t :: :ets.table()
 

@@ -3,7 +3,7 @@ defmodule Bedrock.DataPlane.Log do
   """
 
   alias Bedrock.DataPlane.Log.EncodedTransaction
-  alias Bedrock.DataPlane.Transaction
+  alias Bedrock.DataPlane.Log.Transaction
   alias Bedrock.Service.Worker
 
   use Bedrock.Internal.GenServerApi

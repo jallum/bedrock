@@ -63,7 +63,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Pushing do
              version
            ),
          {:ok, new_writer} <- Writer.open(new_segment.path) do
-      %{
+      %State{
         t
         | writer: new_writer,
           active_segment: new_segment,

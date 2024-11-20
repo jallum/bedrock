@@ -2,7 +2,7 @@ defmodule Bedrock.DataPlane.Resolver.Recovery do
   alias Bedrock.DataPlane.Log
   alias Bedrock.DataPlane.Resolver.State
   alias Bedrock.DataPlane.Resolver.Tree
-  alias Bedrock.DataPlane.Transaction
+  alias Bedrock.DataPlane.Log.Transaction
 
   @spec recover_from(
           State.t(),
@@ -63,7 +63,6 @@ defmodule Bedrock.DataPlane.Resolver.Recovery do
     end
   end
 
-  @spec apply_batch_of_transactions(Tree.t(), [Transaction.t()]) :: {Tree.t(), Bedrock.version()}
   def apply_batch_of_transactions(tree, transactions) do
     transactions
     |> Enum.reduce(
@@ -75,8 +74,7 @@ defmodule Bedrock.DataPlane.Resolver.Recovery do
   end
 
   @spec apply_transaction(Tree.t(), Transaction.t()) :: {Tree.t(), Bedrock.version()}
-  def apply_transaction(tree, transaction) do
-    {write_version, writes} = transaction |> Transaction.decode()
+  def apply_transaction(tree, {write_version, writes}) do
     {writes |> Enum.reduce(tree, &Tree.insert(&2, &1, write_version)), write_version}
   end
 end
