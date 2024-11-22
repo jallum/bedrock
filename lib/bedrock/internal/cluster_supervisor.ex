@@ -183,7 +183,15 @@ defmodule Bedrock.Internal.ClusterSupervisor do
     end
   end
 
-  @spec path_to_descriptor(module(), otp_app :: atom()) :: Path.t()
+  @spec path_to_descriptor(module(), otp_app :: atom() | nil) :: Path.t()
+  def path_to_descriptor(module, nil) do
+    module.node_config()
+    |> Keyword.get(
+      :path_to_descriptor,
+      Bedrock.Cluster.default_descriptor_file_name()
+    )
+  end
+
   def path_to_descriptor(module, otp_app) do
     module.node_config()
     |> Keyword.get(

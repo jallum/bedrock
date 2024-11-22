@@ -1,0 +1,82 @@
+# Untitled notebook
+
+```elixir
+Mix.install([
+  {:benchee, "~> 1.3"}
+])
+```
+
+## Why?
+
+We have frequent need to turn a hash map into a list sorted by key. This basic operation is heavily used during the encoding of transactions. We'd like to compare the following methods:
+
+* using :maps iterators to produce a :gb_tree, and then turn the tree into a list
+* using Enum.sort() directly on the map
+
+```elixir
+defmodule UsingGBTrees do
+  def to_sorted_list(map) do
+    map
+    |> to_gb_tree()
+    |> :gb_trees.iterator()
+    |> :gb_trees.next()
+    |> list_from_gbtrees_iterator()
+  end
+
+  defp list_from_gbtrees_iterator({key, value, next_iterator}),
+    do: [{key, value} | list_from_gbtrees_iterator(:gb_trees.next(next_iterator))]
+
+  defp list_from_gbtrees_iterator(:none),
+    do: []
+
+  def to_gb_tree(map) do
+    :maps.iterator(map)
+    |> :maps.next()
+    |> tree_from_map_iterator()
+  end
+
+  defp tree_from_map_iterator({key, value, next_iterator}),
+    do: :gb_trees.insert(key, value, tree_from_map_iterator(:maps.next(next_iterator)))
+
+  defp tree_from_map_iterator(:none),
+    do: :gb_trees.empty()
+end
+```
+
+```elixir
+defmodule UsingEnumSortV1 do
+  def to_sorted_list(map), do: map |> Enum.sort()
+end
+```
+
+```elixir
+defmodule UsingEnumSortV2 do
+  def to_sorted_list(map), do: map |> Map.keys() |> Enum.sort() |> Enum.map(&{&1, Map.get(map, &1)})
+end
+```
+
+```elixir
+defmodule Data do
+  def random_binary_map(n_keys, key_length, jitter) do
+    1..n_keys
+    |> Map.new(fn _ -> {:crypto.strong_rand_bytes(key_length + :rand.uniform(jitter)), true} end)
+  end
+end
+```
+
+```elixir
+Benchee.run(
+  %{
+    "using :gb_trees" => &UsingGBTrees.to_sorted_list/1,
+    "using Enum.sort directly" => &UsingEnumSortV1.to_sorted_list/1,
+    "using Enum.sort on keys then a lookup" => &UsingEnumSortV2.to_sorted_list/1
+  },
+  inputs: %{
+    "10" => Data.random_binary_map(10, 10, 5),
+    "100" => Data.random_binary_map(100, 10, 5),
+    "1k" => Data.random_binary_map(1_000, 10, 5)
+  }
+)
+
+:ok
+```

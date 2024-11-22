@@ -38,7 +38,7 @@ defmodule Bedrock.Cluster do
 
   @doc false
   defmacro __using__(opts) do
-    otp_app = opts[:otp_app] || raise "Missing :otp_app option"
+    otp_app = opts[:otp_app]
     name = opts[:name] || raise "Missing :name option"
 
     # credo:disable-for-next-line Credo.Check.Refactor.LongQuoteBlocks
@@ -95,7 +95,10 @@ defmodule Bedrock.Cluster do
       """
       @impl true
       @spec node_config() :: Keyword.t()
-      def node_config, do: Application.get_env(unquote(otp_app), __MODULE__, [])
+      def node_config, do: node_config_from_otp_app(unquote(otp_app))
+
+      defp node_config_from_otp_app(nil), do: []
+      defp node_config_from_otp_app(otp_app), do: Application.get_env(otp_app, __MODULE__, [])
 
       @doc """
       Get the capability advertised to the cluster by this node.

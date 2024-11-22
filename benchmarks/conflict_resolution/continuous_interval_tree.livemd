@@ -1,0 +1,127 @@
+<!-- livebook:{"persist_outputs":true} -->
+
+# Continuous Interval Tree
+
+```elixir
+Mix.install([
+  {:benchee, "~> 1.3"}
+])
+
+```
+
+## Code
+
+The idea here is to use a balanced tree to represent the conflict-space that a Resolver needs to model in order to properly detect conflicts. Basically, the keys in the tree are the start keys of an interval. The values are an end key (exclusive) and the version at which it was written. There should only be one interval that covers a given range of keys, and no overlapping intervals are allowed within the tree.
+
+### Insertion
+
+When inserting an interval into the tree, we look for an exact-match on the min-key of the range we'd like to insert. If we don't find one, we look backwards to the next smallest key and see if it's max_ex-key overlaps with the interval we're intending to insert. If it does, we "split" it so that when we insert our new range the old one _ends_ where we _begin._
+
+We then need to roll forward through the tree deleting any intervals that we come across that have a max_key_ex less than our new max_key_ex. We'll either hit the end of the tree (and we're done) or we hit an interval that can partially overlap. If we do, we need to split that one such that it _begins_ where we _end._
+
+### Read-Write Conflict-Checks
+
+We start by doing a lookup on the exact min-key. If we find a match, we check the version against the version we're "reading." If the version we find is less than or equal to our version, we're fine. No conflict. If it's greater, then there's been an intervening write and we can abort the transaction. If we didn't find an exact match, we roll backward to the next interval and check to see if it overlaps with the one we're probing. If it does, we perform the same version checks as we would on the exact match, to the same effect.
+
+### Write-Write Conflict Checks
+
+Don't really need to happen, near as I can tell. We're a strictly-serializable system and as such, things happen in a _definite order_. Conflict checks are peformed in the same defined order, so the first one to be processed always wins and it's writes are added to the tree only if it is otherwise conflict-free.
+
+```elixir
+defmodule ContinuousIntervalTree do
+  def new(), do: :gb_trees.empty()
+
+  def insert(tree, {new_min, new_max_ex}, new_version)
+      when is_binary(new_min) and is_binary(new_max_ex) and new_min < new_max_ex do
+    tree =
+      case :gb_trees.smaller(new_min, tree) do
+        :none ->
+          tree
+
+        {min, {max_ex, version}} when max_ex > new_min ->
+          # Adjust the left overlap
+          tree = :gb_trees.enter(min, {new_min, version}, tree)
+          if new_max_ex < max_ex do
+            :gb_trees.enter(new_max_ex, {max_ex, version}, tree)
+          else 
+            tree
+          end
+
+        _ ->
+          tree
+      end
+
+    iterator = :gb_trees.iterator_from(new_min, tree)
+    tree = process_intervals(tree, iterator, new_min, new_max_ex, new_version)
+    :gb_trees.enter(new_min, {new_max_ex, new_version}, tree)
+  end
+
+  def insert(_, _, _), do: raise(ArgumentError, "Invalid interval or version")
+
+  defp process_intervals(tree, iterator, new_min, new_max_ex, new_version) do
+    case :gb_trees.next(iterator) do
+      {min, {max_ex, version}, next_iterator} ->
+        if new_max_ex < max_ex do
+          if min < new_max_ex do
+            tree = :gb_trees.delete(min, tree)
+            :gb_trees.enter(new_max_ex, {max_ex, version}, tree)
+          else
+            tree
+          end
+        else
+          tree = :gb_trees.delete(min, tree)
+          process_intervals(tree, next_iterator, new_min, new_max_ex, new_version)
+        end
+
+      :none ->
+        tree
+    end
+  end
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:module, ContinuousIntervalTree, <<70, 79, 82, 49, 0, 0, 13, ...>>, {:process_intervals, 5}}
+```
+
+```elixir
+tree = ContinuousIntervalTree.new()
+
+# Insert some initial intervals
+tree = ContinuousIntervalTree.insert(tree, {"a", "d"}, 1)
+tree = ContinuousIntervalTree.insert(tree, {"f", "j"}, 2)
+#tree = ContinuousIntervalTree.insert(tree, {"m", "q"}, 3)
+
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{2, {"a", {"d", 1}, nil, {"f", {"j", 2}, nil, nil}}}
+```
+
+```elixir
+#tree = ContinuousIntervalTree.insert(tree, {"c", "g"}, 4)
+
+
+
+# # Insert a new interval that overlaps and splits
+tree = ContinuousIntervalTree.insert(tree, {"a", "c"}, 4)
+
+# Inspect the resulting tree
+IO.inspect(:gb_trees.to_list(tree), label: "Intervals After Insert")
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+Intervals After Insert: [{"a", {"c", 4}}, {"c", {"d", 1}}, {"f", {"j", 2}}]
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+[{"a", {"c", 4}}, {"c", {"d", 1}}, {"f", {"j", 2}}]
+```

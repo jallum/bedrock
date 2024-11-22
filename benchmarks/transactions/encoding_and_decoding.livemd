@@ -1,0 +1,78 @@
+# Transaction Encoding and Decoding
+
+```elixir
+livebook_file_path = Path.expand(__ENV__.file)
+project_root = Path.dirname(livebook_file_path) |> Path.join("../..")
+Mix.install([
+  {:bedrock, path: project_root},
+  {:benchee, "~> 1.3"}
+])
+```
+
+## Why?
+
+Transactions need to be encoded for, storage, for transport... for a variety of reasons. We aim to have an encoded format that:
+
+* can still be worked with and searched without having to fully decode the entire thing.
+* is simple to compose / decompose
+
+Here, we're taking a look at how long it takes to encode/decode transactions of various sizes.
+
+## Data Generation
+
+Randomly generated keys and values, with a key length of 5 and a value length of 10.
+
+```elixir
+alias Bedrock.DataPlane.Log.EncodedTransaction
+
+defmodule RandomTransactionGenerator do
+  def generate(num_items \\ 10, key_length \\ 5, value_length \\ 10) do
+    version = :rand.uniform(1_000_000)
+
+    key_values =
+      1..num_items
+      |> Map.new(fn _ ->
+        {generate_random_binary(key_length), generate_random_binary(value_length)}
+      end)
+
+    {version, key_values}
+  end
+
+  def generate_encoded(num_items \\ 10, key_length \\ 5, value_length \\ 10),
+    do: EncodedTransaction.encode(generate(num_items, key_length, value_length))
+
+  defp generate_random_binary(length), do: :crypto.strong_rand_bytes(length)
+end
+```
+
+## Benchmark
+
+```elixir
+Benchee.run(
+  %{
+    "encode" => &EncodedTransaction.encode/1
+  },
+  inputs: %{
+    "10" => RandomTransactionGenerator.generate(10),
+    "100" => RandomTransactionGenerator.generate(100),
+    "1k" => RandomTransactionGenerator.generate(1_000)
+  }
+)
+
+:ok
+```
+
+```elixir
+Benchee.run(
+  %{
+    "decode" =>&EncodedTransaction.decode!/1
+  },
+  inputs: %{
+    "10" => RandomTransactionGenerator.generate_encoded(10),
+    "100" => RandomTransactionGenerator.generate_encoded(100),
+    "1k" => RandomTransactionGenerator.generate_encoded(1_000)
+  }
+)
+
+:ok
+```

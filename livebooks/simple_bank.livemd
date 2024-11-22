@@ -1,0 +1,108 @@
+# Untitled notebook
+
+```elixir
+livebook_file_path = Path.expand(__ENV__.file)
+project_root = Path.dirname(livebook_file_path) |> Path.join("..")
+Mix.install([
+  {:bedrock, path: project_root},
+])
+```
+
+## Section
+
+```elixir
+defmodule Sample.Cluster do
+  use Bedrock.Cluster,
+    name: "sample",
+    capabilities: [:coordination, :log, :storage],
+    trace: [:commiÎt_proxy, :recovery]
+end
+```
+
+```elixir
+sup_pid = Process.whereis(:sample_app)
+if sup_pid do
+  Supervisor.stop(sup_pid)
+end
+
+children = [
+  Sample.Cluster
+]
+
+Supervisor.start_link(children, strategy: :one_for_one, name: :sample_app)
+```
+
+```elixir
+defmodule Sample.Repo do
+  use Bedrock.Repo,
+    cluster: Sample.Cluster,
+        key_codecs: [
+      default: Bedrock.KeyCodec.TupleKeyCodec
+    ],
+    value_codecs: [
+      default: Bedrock.ValueCodec.BertValueCodec
+    ]
+end
+```
+
+```elixir
+defmodule Sample.App do
+  alias Sample.Repo
+
+  def move_money(amount, account1, account2) do
+    Repo.transaction(fn repo ->
+      with :ok <- check_sufficient_balance_for_transfer(repo, account1, amount),
+           {:ok, new_balance1} <- adjust_balance(repo, account1, -amount),
+           {:ok, new_balance2} <- adjust_balance(repo, account2, amount) do
+        {:ok, new_balance1, new_balance2}
+      end
+    end)
+  end
+
+  def check_sufficient_balance_for_transfer(repo, account, amount) do
+    with {:ok, balance} <- fetch_balance(repo, account) do
+      if can_withdraw?(amount, balance) do
+        :ok
+      else
+        {:error, "Insufficient funds"}
+      end
+    end
+  end
+
+  def fetch_balance(repo, account) do
+    case Repo.fetch(repo, key_for_account_balance(account)) do
+      {:ok, balance} -> {:ok, balance}
+      _ -> {:error, "Account not found"}
+    end
+  end
+
+  def adjust_balance(repo, account, amount) do
+    with {:ok, balance} <- fetch_balance(repo, account) do
+      new_balance = balance + amount
+      Repo.put(repo, key_for_account_balance(account), new_balance)
+      {:ok, new_balance}
+    end
+  end
+
+  def can_withdraw?(amount, balance), do: balance >= amount
+
+  def key_for_account_balance(account), do: {"balances", account}
+
+  def setup_accounts do
+    Repo.transaction(fn repo ->
+      Repo.put(repo, key_for_account_balance("1"), 100)
+      Repo.put(repo, key_for_account_balance("2"), 500)
+      :ok
+    end)
+  end
+end
+```
+
+```elixir
+
+```
+
+```elixir
+Sample.Cluster.coordinator!
+|> Process.whereis()
+```

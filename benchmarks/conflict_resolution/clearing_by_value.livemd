@@ -1,0 +1,295 @@
+# Clearing by version
+
+```elixir
+Mix.install([
+  {:benchee, "~> 1.3"}
+])
+```
+
+## Why?
+
+For conflict checking transactions, we'll need to periodically clear the older version data from whatever structure we use for the job. Here, we simulate that task with gb_sets, maps and ETS tables and see which one will let us clear versions that fall below a threshold. We'll process the entire structure, and scan it by value producing a new structure that contains only the keys that meet the high-pass filter.
+
+The goal is to dermine which built-in data structure is more efficient for this specific operation.
+
+We simulate with 1k, 10k and 100k keys and try clearing ~20% and ~80% of the structures.
+
+<!-- livebook:{"break_markdown":true} -->
+
+### Maps v1
+
+Reducing over a Map, selectively adding key/values to a new Map
+
+```elixir
+defmodule ClearingMapsV1 do
+  def clear_keys_below_threshold({threshold, map}) do
+    Enum.reduce(map, %{}, fn
+      {key, version}, map ->
+        if threshold >= version do
+          map
+        else
+          Map.put(map, key, version)
+        end
+    end)
+  end
+end
+```
+
+### Maps v2
+
+Filtering a Map with Enum.reject, creating a new Map
+
+```elixir
+defmodule ClearingMapsV2 do
+  def clear_keys_below_threshold({threshold, map}) do
+    Enum.reject(map, fn
+      {_key, version} -> threshold >= version
+    end)
+    |> Map.new()
+  end
+end
+```
+
+### :gb_tree v1
+
+Using an iterator over the tree, deleting items from the tree as we go
+
+```elixir
+defmodule ClearingTreesV1 do
+  def clear_keys_below_threshold({threshold, tree}) do
+    do_clear_keys(:gb_trees.iterator(tree, :ordered), threshold, tree)
+  end
+
+  defp do_clear_keys(iterator, threshold, tree) do
+    case :gb_trees.next(iterator) do
+      {key, version, iterator} ->
+        tree =
+          if threshold >= version do
+            :gb_trees.delete(key, tree)
+          else
+            tree
+          end
+
+        do_clear_keys(iterator, threshold, tree)
+
+      :none ->
+        tree
+    end
+  end
+end
+```
+
+### :gb_tree v2
+
+Same as v1, but using pattern matching in function heads
+
+```elixir
+defmodule ClearingTreesV2 do
+  def clear_keys_below_threshold({threshold, tree}) do
+    tree
+    |> :gb_trees.iterator(:ordered)
+    |> :gb_trees.next()
+    |> do_clear_keys(threshold, tree)
+  end
+
+  defp do_clear_keys({key, version, iterator}, threshold, tree) when threshold >= version,
+    do: do_clear_keys(iterator |> :gb_trees.next(), threshold, :gb_trees.delete(key, tree))
+
+  defp do_clear_keys({_key, _version, iterator}, threshold, tree),
+    do: do_clear_keys(iterator |> :gb_trees.next(), threshold, tree)
+
+  defp do_clear_keys(:none, _threshold, tree),
+    do: tree
+end
+```
+
+### :gb_tree v3
+
+Same as v2, but build _up_ a new tree instead of deleting things from the existing one.
+
+```elixir
+defmodule ClearingTreesV3 do
+  def clear_keys_below_threshold({threshold, tree}) do
+    tree
+    |> :gb_trees.iterator(:ordered)
+    |> :gb_trees.next()
+    |> do_clear_keys(threshold, :gb_trees.empty())
+  end
+
+  defp do_clear_keys({_key, version, iterator}, threshold, tree) when threshold >= version,
+    do: do_clear_keys(iterator |> :gb_trees.next(), threshold, tree)
+
+  defp do_clear_keys({key, version, iterator}, threshold, tree),
+    do: do_clear_keys(iterator |> :gb_trees.next(), threshold, :gb_trees.insert(key, version, tree))
+
+  defp do_clear_keys(:none, _threshold, tree),
+    do: tree
+end
+```
+
+### ETS v1
+
+Using select_delete and a match selector
+
+```elixir
+defmodule ClearingETSV1 do
+  def clear_keys_below_threshold({threshold, table}) do
+    :ets.select_delete(table, [{{:_, :"$2"}, [{:<, :"$2", threshold}], [true]}])
+    table
+  end
+end
+```
+
+### ETS v2
+
+Using `foldl/3` and deleting with `delete/2`
+
+```elixir
+defmodule ClearingETSV2 do
+  def clear_keys_below_threshold({threshold, table}) do
+    :ets.foldl(
+      fn {key, value}, _acc ->
+        if value < threshold do
+          :ets.delete(table, key)
+        end
+      end,
+      :ok,
+      table
+    )
+
+    table
+  end
+end
+```
+
+```elixir
+defmodule Data do
+  def generate_map(size, threshold_pct) do
+    {round(100_000 * threshold_pct / 100),
+     1..size
+     |> Map.new(fn _ ->
+       {:crypto.strong_rand_bytes(5 + :rand.uniform(25)), :rand.uniform(100_000)}
+     end)}
+  end
+
+  def to_tree({threshold, map}),
+    do: {threshold, map |> Enum.to_list() |> Enum.sort() |> :gb_trees.from_orddict()}
+
+  def to_ets({threshold, map}) do
+    table = :ets.new(nil, [:protected, :ordered_set])
+    :ets.insert(table, map |> Enum.to_list())
+    {threshold, table}
+  end
+end
+```
+
+## Sanity Checks
+
+Ensure that the conversion from map to tree is correct, and that the functions to clear the values below the threshold work as expected and all return the same results.
+
+```elixir
+{threshold, map} =
+  Data.generate_map(1_000, 10)
+
+{_threshold, tree} =
+  Data.to_tree({threshold, map})
+
+{_threshold, table1} =
+  Data.to_ets({threshold, map})
+
+{_threshold, table2} =
+  Data.to_ets({threshold, map})
+
+unless Enum.to_list(map) |> Enum.sort() == :gb_trees.to_list(tree) do
+  raise "Data conversion failed"
+end
+
+tree_size_v1 =
+  ClearingTreesV1.clear_keys_below_threshold({threshold, tree})
+  |> :gb_trees.size()
+
+tree_size_v2 =
+  ClearingTreesV2.clear_keys_below_threshold({threshold, tree})
+  |> :gb_trees.size()
+
+tree_size_v3 =
+  ClearingTreesV3.clear_keys_below_threshold({threshold, tree})
+  |> :gb_trees.size()
+
+map_size_v1 =
+  ClearingMapsV1.clear_keys_below_threshold({threshold, map})
+  |> map_size()
+
+map_size_v2 =
+  ClearingMapsV2.clear_keys_below_threshold({threshold, map})
+  |> map_size()
+
+ets_size_v1 =
+  ClearingETSV1.clear_keys_below_threshold({threshold, table1})
+  |> :ets.tab2list()
+  |> length()
+
+ets_size_v2 =
+  ClearingETSV2.clear_keys_below_threshold({threshold, table2})
+  |> :ets.tab2list()
+  |> length()
+
+unless 6 * tree_size_v1 ==
+         ets_size_v1 + ets_size_v2 + tree_size_v2 + tree_size_v3 + map_size_v1 + map_size_v2 do
+  IO.puts("Map size v1: #{map_size_v1}")
+  IO.puts("Map size v2: #{map_size_v2}")
+  IO.puts("Tree size v1: #{tree_size_v1}")
+  IO.puts("Tree size v2: #{tree_size_v2}")
+  IO.puts("Tree size v3: #{tree_size_v3}")
+  IO.puts("ETS size v1: #{ets_size_v1}")
+  IO.puts("ETS size v2: #{ets_size_v2}")
+  raise "Sizes do not match"
+end
+
+:ok
+```
+
+## Benchmark
+
+```elixir
+Benchee.run(
+  %{
+    "gb_trees range-clear v1" => {
+      &ClearingTreesV1.clear_keys_below_threshold/1,
+      before_scenario: &Data.to_tree/1
+    },
+    "gb_trees range-clear v2" => {
+      &ClearingTreesV2.clear_keys_below_threshold/1,
+      before_scenario: &Data.to_tree/1
+    },
+    "gb_trees range-clear v3" => {
+      &ClearingTreesV3.clear_keys_below_threshold/1,
+      before_scenario: &Data.to_tree/1
+    },
+    "map range-clear v1" => &ClearingMapsV1.clear_keys_below_threshold/1,
+    "map range-clear v2" => &ClearingMapsV2.clear_keys_below_threshold/1,
+    "ets range-clear v1" =>
+      {&ClearingETSV1.clear_keys_below_threshold/1, before_each: &Data.to_ets/1},
+    "ets range-clear v2" =>
+      {&ClearingETSV2.clear_keys_below_threshold/1, before_each: &Data.to_ets/1}
+  },
+  inputs: %{
+    "1k @ 20%" => Data.generate_map(1_000, 20),
+    "10k @ 20%" => Data.generate_map(10_000, 20),
+    "100k @ 20%" => Data.generate_map(100_000, 20),
+    "1k @ 80%" => Data.generate_map(1_000, 80),
+    "10k @ 80%" => Data.generate_map(10_000, 80),
+    "100k @ 80%" => Data.generate_map(100_000, 80)
+  }
+)
+
+:ok
+```
+
+## Results (on my machine, of course. YMMV)
+
+So, this is interesting. It seems like it _really_ matters how much data is surviving from one generation to the next. If most of the data is being preserved, then gb_trees are pretty solid. If most of the data is being thrown away, it seems like Maps are a good bet.
+
+It _might_ be worth tracking some statistics in the Resolver to see if we can estimate _how much_ we plan to throw away, and then use different techniques depending on the answer.
+
+I was surprised to see gb_trees outperforming ETS.
