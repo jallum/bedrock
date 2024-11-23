@@ -120,7 +120,7 @@ defmodule Bedrock.Service.Foreman.Impl do
   def notify_waiting_for_healthy(t), do: t
 
   @spec worker_for_kind(:log | :storage) :: module()
-  defp worker_for_kind(:log), do: Bedrock.DataPlane.Log.Limestone
+  defp worker_for_kind(:log), do: Bedrock.DataPlane.Log.Shale
   defp worker_for_kind(:storage), do: Bedrock.DataPlane.Storage.Basalt
 
   @spec otp_names_for_running_workers(State.t()) :: [atom()]
