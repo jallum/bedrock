@@ -10,6 +10,7 @@ defmodule Bedrock.Internal.ClusterSupervisor do
   alias Bedrock.DataPlane.CommitProxy.Tracing, as: CommitProxyTracing
   alias Bedrock.DataPlane.Log.Tracing, as: LogTracing
   alias Bedrock.Internal.Tracing.RaftTelemetry
+  alias Bedrock.Cluster.Bootstrap.Tracing, as: BootstrapTracing
 
   require Logger
 
@@ -88,6 +89,7 @@ defmodule Bedrock.Internal.ClusterSupervisor do
     cluster.node_config()
     |> Keyword.get(:trace, [])
     |> Enum.each(fn
+      :bootstrap -> :ok = BootstrapTracing.start()
       :coordinator -> :ok = CoordinatorTracing.start()
       :commit_proxy -> :ok = CommitProxyTracing.start()
       :log -> :ok = LogTracing.start()
@@ -110,7 +112,10 @@ defmodule Bedrock.Internal.ClusterSupervisor do
            mode: mode_for_capabilities(capabilities)
          ]}
         | children_for_capabilities(cluster, capabilities)
-      ]
+      ] ++
+        [
+          {Bedrock.Cluster.Bootstrap, [cluster: cluster, foreman: cluster.otp_name(:foreman)]}
+        ]
 
     Supervisor.init(children, strategy: :one_for_one)
   end
