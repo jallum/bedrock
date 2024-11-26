@@ -37,7 +37,7 @@ defmodule Bedrock.DataPlane.CommitProxy.Tracing do
         commit_version: commit_version
       }) do
     info(
-      "Transaction Batch #{commit_version} completed with #{n_aborts} aborts and #{n_oks} oks in #{humanize({duration_us, :microsecond})}"
+      "Transaction Batch #{commit_version} completed with #{n_aborts} aborts and #{n_oks} oks in #{humanize({:microsecond, duration_us})}"
     )
   end
 
@@ -46,7 +46,7 @@ defmodule Bedrock.DataPlane.CommitProxy.Tracing do
         commit_version: commit_version
       }) do
     error(
-      "Transaction Batch #{commit_version} failed (#{inspect(reason)}) in #{humanize({duration_us, :microsecond})}"
+      "Transaction Batch #{commit_version} failed (#{inspect(reason)}) in #{humanize({:microsecond, duration_us})}"
     )
   end
 

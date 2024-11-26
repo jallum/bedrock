@@ -12,23 +12,33 @@ defmodule Bedrock.Service.Foreman do
   @doc """
   Return a list of running workers.
   """
-  @spec all(foreman :: ref()) :: {:ok, [Worker.ref()]} | {:error, term()}
-  def all(foreman), do: call(foreman, :workers, 5_000)
+  @spec all(foreman :: ref(), opts :: [timeout: timeout()]) ::
+          {:ok, [Worker.ref()]} | {:error, term()}
+  def all(foreman, opts \\ []),
+    do: call(foreman, :workers, to_timeout(opts[:timeout] || :infinity))
 
   @doc """
   Create a new worker.
   """
-  @spec new_worker(foreman :: ref(), id :: Worker.id(), kind :: :log | :storage) ::
+  @spec new_worker(
+          foreman :: ref(),
+          id :: Worker.id(),
+          kind :: :log | :storage,
+          opts :: [timeout: timeout()]
+        ) ::
           {:ok, Worker.ref()} | {:error, term()}
-  def new_worker(foreman, id, kind), do: call(foreman, {:new_worker, id, kind}, 5_000)
+  def new_worker(foreman, id, kind, opts \\ []),
+    do: call(foreman, {:new_worker, id, kind}, to_timeout(opts[:timeout] || :infinity))
 
   @doc """
   Wait until the foreman signals that it (and all of it's workers) are
   reporting that they are healthy, or the timeout happens... whichever comes
   first.
   """
-  @spec wait_for_healthy(foreman :: ref(), timeout()) :: :ok | {:error, :unavailable}
-  def wait_for_healthy(foreman, timeout), do: call(foreman, :wait_for_healthy, timeout)
+  @spec wait_for_healthy(foreman :: ref(), opts :: [timeout: timeout()]) ::
+          :ok | {:error, :unavailable}
+  def wait_for_healthy(foreman, opts \\ []),
+    do: call(foreman, :wait_for_healthy, to_timeout(opts[:timeout] || :infinity))
 
   @doc """
   Called by a worker to report it's health to the foreman.

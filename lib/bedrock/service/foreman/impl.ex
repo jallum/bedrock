@@ -20,7 +20,7 @@ defmodule Bedrock.Service.Foreman.Impl do
   def do_fetch_workers(t),
     do: otp_names_for_running_workers(t)
 
-  @spec do_new_worker(State.t(), Worker.id(), :log | :storage) :: {State.t(), Worker.health()}
+  @spec do_new_worker(State.t(), Worker.id(), :log | :storage) :: {State.t(), Worker.ref()}
   def do_new_worker(t, id, kind) do
     worker_info =
       id
@@ -32,7 +32,7 @@ defmodule Bedrock.Service.Foreman.Impl do
       t
       |> update_workers(&Map.put(&1, id, worker_info))
 
-    {t, worker_info.health}
+    {t, worker_info.otp_name}
   end
 
   def advertise_running_workers(worker_infos, cluster) do

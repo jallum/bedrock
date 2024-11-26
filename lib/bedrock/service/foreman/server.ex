@@ -35,7 +35,7 @@ defmodule Bedrock.Service.Foreman.Server do
     do: t |> do_fetch_workers() |> then(&(t |> reply({:ok, &1})))
 
   def handle_call({:new_worker, id, kind}, _from, t),
-    do: t |> do_new_worker(id, kind) |> then(fn {t, health} -> t |> reply(health) end)
+    do: t |> do_new_worker(id, kind) |> then(fn {t, health} -> t |> reply({:ok, health}) end)
 
   def handle_call(:wait_for_healthy, from, t) do
     t

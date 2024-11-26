@@ -100,6 +100,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Logic do
       id
       pid
       path
+      key_ranges
       kind
       n_keys
       otp_name
@@ -111,6 +112,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Logic do
   defp gather_info(:oldest_durable_version, t), do: Database.oldest_durable_version(t.database)
   defp gather_info(:durable_version, t), do: Database.last_durable_version(t.database)
   defp gather_info(:id, t), do: t.id
+  defp gather_info(:key_ranges, t), do: Database.info(t.database, :key_ranges)
   defp gather_info(:kind, _t), do: :storage
   defp gather_info(:n_keys, t), do: Database.info(t.database, :n_keys)
   defp gather_info(:otp_name, t), do: t.otp_name

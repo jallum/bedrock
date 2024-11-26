@@ -22,6 +22,9 @@ defmodule Bedrock do
   @type interval_in_ms :: :infinity | non_neg_integer()
   @type interval_in_us :: :infinity | non_neg_integer()
 
+  @type time_unit :: Bedrock.Internal.Time.Interval.unit()
+  @type interval :: {Bedrock.time_unit(), non_neg_integer()}
+
   @type range_tag :: non_neg_integer()
 
   @type service :: :coordination | :log | :storage

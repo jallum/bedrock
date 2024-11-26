@@ -9,8 +9,8 @@ defmodule Bedrock.DataPlane.Storage do
   @type key_range :: Bedrock.key_range()
   @type fact_name ::
           Worker.fact_name()
+          | :key_ranges
           | :durable_version
-          | :key_range
           | :n_objects
           | :path
           | :size_in_bytes
@@ -32,7 +32,7 @@ defmodule Bedrock.DataPlane.Storage do
           storage :: ref(),
           Bedrock.key(),
           Bedrock.version(),
-          opts :: [timeout_in_ms: Bedrock.timeout_in_ms()]
+          opts :: [timeout: timeout()]
         ) ::
           {:ok, Bedrock.value()}
           | {:error,
@@ -42,7 +42,7 @@ defmodule Bedrock.DataPlane.Storage do
              | :version_too_new
              | :unavailable}
   def fetch(storage, key, version, opts \\ []) when is_binary(key),
-    do: call(storage, {:fetch, key, version, opts}, opts[:timeout_in_ms] || :infinity)
+    do: call(storage, {:fetch, key, version, opts}, opts[:timeout] || :infinity)
 
   @doc """
   Request that the storage service lock itself and stop pulling new transactions

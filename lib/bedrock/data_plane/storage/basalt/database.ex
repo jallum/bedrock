@@ -125,7 +125,8 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Database do
   * `:utilization` - the utilization of the database (as a percentage, expressed
     as a float between 0.0 and 1.0)
   """
-  @spec info(database :: t(), :n_keys | :utilization | :size_in_bytes) :: any() | :undefined
+  @spec info(database :: t(), :n_keys | :utilization | :size_in_bytes | :key_ranges) ::
+          any() | :undefined
   def info(database, stat),
     do: database.pkv |> PersistentKeyValues.info(stat)
 

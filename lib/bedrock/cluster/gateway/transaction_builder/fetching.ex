@@ -61,7 +61,7 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.Fetching do
         end
 
       storage_server ->
-        Storage.fetch(storage_server, key, t.read_version, timeout_in_ms: t.fetch_timeout_in_ms)
+        Storage.fetch(storage_server, key, t.read_version, timeout: t.fetch_timeout_in_ms)
         |> case do
           {:ok, value} -> {:ok, t, value}
           error -> error
@@ -141,7 +141,7 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.Fetching do
     storage_servers
     |> Task.async_stream(
       fn {key_range, storage_server} ->
-        Storage.fetch(storage_server, key, read_version, timeout_in_ms: fetch_timeout_in_ms)
+        Storage.fetch(storage_server, key, read_version, timeout: fetch_timeout_in_ms)
         |> case do
           {:ok, value} -> {key_range, storage_server, value}
           error -> error

@@ -93,8 +93,10 @@ defmodule Bedrock.DataPlane.Storage.Basalt.PersistentKeyValues do
   * `:size_in_bytes` - the size of the store in bytes
   * `:utilization` - the utilization of the database (as a percentage, expressed
     as a float between 0.0 and 1.0)
+  * `:key_ranges` - the key ranges for which this store is responsible
   """
-  @spec info(pkv :: t(), :n_keys | :size_in_bytes | :utilization) :: any() | :undefined
+  @spec info(pkv :: t(), :n_keys | :size_in_bytes | :utilization | :key_ranges) ::
+          any() | :undefined
   def info(pkv, :n_keys) do
     # We don't count the :last_version key
     pkv
@@ -102,6 +104,15 @@ defmodule Bedrock.DataPlane.Storage.Basalt.PersistentKeyValues do
     |> case do
       0 -> 0
       n_keys -> n_keys - 1
+    end
+  end
+
+  def info(pkv, :key_ranges) do
+    pkv
+    |> :dets.lookup(:key_ranges)
+    |> case do
+      key_ranges when is_list(key_ranges) -> key_ranges
+      _ -> []
     end
   end
 

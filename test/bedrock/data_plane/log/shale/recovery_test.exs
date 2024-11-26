@@ -87,9 +87,6 @@ defmodule Bedrock.DataPlane.Log.Shale.RecoveryTest do
       receive do
         {:"$gen_call", {from, ref}, {:pull, _version, _opts}} ->
           send(from, {ref, {:ok, transactions}})
-
-        x ->
-          IO.inspect(x)
       after
         500 -> :timeout
       end

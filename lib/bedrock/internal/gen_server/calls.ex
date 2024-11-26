@@ -8,10 +8,10 @@ defmodule Bedrock.Internal.GenServer.Calls do
   @spec cast(GenServer.server(), message :: any()) :: :ok
   def cast(server, message), do: GenServer.cast(server, message)
 
-  @spec call(GenServer.server(), message :: any(), timeout() | :infinity) :: term()
+  @spec call(GenServer.server(), message :: any(), timeout()) :: term()
   def call(server, message, timeout) do
     try do
-      GenServer.call(server, message, timeout)
+      GenServer.call(server, message, to_timeout(timeout))
     rescue
       _ -> {:error, :unknown}
     catch
