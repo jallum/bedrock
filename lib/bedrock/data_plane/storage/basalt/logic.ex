@@ -80,6 +80,9 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Logic do
   def fetch(%State{} = t, key, version),
     do: Database.fetch(t.database, key, version)
 
+  def fetch_key_range(%State{} = t, min_key, max_key_ex),
+    do: Database.fetch_key_range(t.database, min_key, max_key_ex)
+
   @spec info(State.t(), Storage.fact_name() | [Storage.fact_name()]) ::
           {:ok, term() | %{Storage.fact_name() => term()}} | {:error, :unsupported_info}
   def info(%State{} = t, fact_name) when is_atom(fact_name),

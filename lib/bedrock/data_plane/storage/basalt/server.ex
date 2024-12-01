@@ -44,6 +44,9 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Server do
   def handle_call({:fetch, key, version, _opts}, _from, %State{} = t),
     do: t |> Logic.fetch(key, version) |> then(&reply(t, &1))
 
+  def handle_call({:range_query, min_key, max_key_ex, _opts}, _from, %State{} = t),
+    do: t |> Logic.fetch_key_range(min_key, max_key_ex) |> then(&reply(t, &1))
+
   def handle_call({:info, fact_names}, _from, %State{} = t),
     do: t |> Logic.info(fact_names) |> then(&reply(t, &1))
 
