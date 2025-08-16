@@ -1,7 +1,7 @@
 defmodule Bedrock.DataPlane.Log.Shale.Recovery do
   @moduledoc false
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log
-  alias Bedrock.DataPlane.Log.EncodedTransaction
   alias Bedrock.DataPlane.Log.Shale.Segment
   alias Bedrock.DataPlane.Log.Shale.SegmentRecycler
   alias Bedrock.DataPlane.Log.Shale.State
@@ -72,24 +72,36 @@ defmodule Bedrock.DataPlane.Log.Shale.Recovery do
     end
   end
 
-  @spec process_transaction_bytes(binary(), {Bedrock.version(), State.t()}) ::
+  @spec process_transaction_bytes(BedrockTransaction.encoded(), {Bedrock.version(), State.t()}) ::
           {:cont, {Bedrock.version(), State.t()}} | {:halt, {:error, term()}}
-  defp process_transaction_bytes(
-         <<version::binary-size(8), _::binary>> = bytes,
-         {last_version, t}
-       ) do
-    handle_valid_transaction_bytes(bytes, Version.from_bytes(version), last_version, t)
+  defp process_transaction_bytes(bytes, {last_version, t}) do
+    case BedrockTransaction.extract_transaction_id(bytes) do
+      {:ok, version} when is_binary(version) ->
+        handle_valid_transaction_bytes(bytes, version, last_version, t)
+
+      {:ok, nil} ->
+        {:halt, {:error, :missing_transaction_id}}
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
+    end
   end
 
   defp process_transaction_bytes(_, _) do
     {:halt, {:error, :invalid_transaction}}
   end
 
-  @spec handle_valid_transaction_bytes(binary(), Bedrock.version(), Bedrock.version(), State.t()) ::
+  @spec handle_valid_transaction_bytes(
+          BedrockTransaction.encoded(),
+          Bedrock.version(),
+          Bedrock.version(),
+          State.t()
+        ) ::
           {:cont, {Bedrock.version(), State.t()}} | {:halt, {:error, term()}}
   defp handle_valid_transaction_bytes(bytes, version, last_version, t) do
-    with {:ok, transaction} <- EncodedTransaction.validate(bytes),
-         {:ok, t} <- push(t, last_version, transaction, fn _ -> :ok end) do
+    # Validate that the transaction can be decoded (but pass the original bytes to push)
+    with {:ok, _transaction} <- BedrockTransaction.decode(bytes),
+         {:ok, t} <- push(t, last_version, bytes, fn _ -> :ok end) do
       {:cont, {version, t}}
     else
       {:wait, _t} -> {:halt, {:error, :tx_out_of_order}}
@@ -164,7 +176,17 @@ defmodule Bedrock.DataPlane.Log.Shale.Recovery do
 
   @spec push_sentinel(State.t(), Bedrock.version()) :: State.t()
   def push_sentinel(t, version) do
-    with sentinel <- EncodedTransaction.encode({version, %{}}),
+    # Create empty BedrockTransaction sentinel
+    sentinel_transaction = %{
+      mutations: []
+    }
+
+    encoded_sentinel = BedrockTransaction.encode(sentinel_transaction)
+    # Ensure version is in binary format
+    version_binary = if is_binary(version), do: version, else: Version.from_integer(version)
+    {:ok, sentinel} = BedrockTransaction.add_transaction_id(encoded_sentinel, version_binary)
+
+    with sentinel <- sentinel,
          {:ok, t} <- push(t, version, sentinel, fn _ -> :ok end) do
       t
     else

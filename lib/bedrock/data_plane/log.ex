@@ -1,8 +1,8 @@
 defmodule Bedrock.DataPlane.Log do
   @moduledoc false
 
-  alias Bedrock.DataPlane.Log.EncodedTransaction
-  alias Bedrock.DataPlane.Log.Transaction
+  # EncodedTransaction removed - using BedrockTransaction binary format
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Version
   alias Bedrock.Service.Worker
 
@@ -56,7 +56,7 @@ defmodule Bedrock.DataPlane.Log do
   """
   @spec push(
           log_ref :: ref(),
-          transaction :: EncodedTransaction.t(),
+          transaction :: BedrockTransaction.encoded(),
           last_commit_version :: Bedrock.version()
         ) ::
           :ok | {:error, :tx_out_of_order | :locked | :unavailable}
@@ -86,7 +86,7 @@ defmodule Bedrock.DataPlane.Log do
 
   ## Return Values:
 
-    - `{:ok, [Transaction.t()]}`: A successful pull with a list of transactions.
+    - `{:ok, [BedrockTransaction.encoded()]}`: A successful pull with a list of encoded transactions.
     - `{:error, :not_ready}`: Log is not ready for pulling.
     - `{:error, :not_locked}`: Log is not locked for pulling transactions.
     - `{:error, :invalid_from_version}`: The provided `from_version` is invalid.
@@ -107,7 +107,7 @@ defmodule Bedrock.DataPlane.Log do
             timeout_in_ms: Bedrock.timeout_in_ms()
           ]
         ) ::
-          {:ok, transactions :: [EncodedTransaction.t()]} | pull_errors()
+          {:ok, transactions :: [BedrockTransaction.encoded()]} | pull_errors()
   @type pull_errors ::
           {:error, :not_ready}
           | {:error, :not_locked}
@@ -126,8 +126,15 @@ defmodule Bedrock.DataPlane.Log do
   is set to 0 during a recovery. It is an explicit a directive to clear the
   entire key range.
   """
-  @spec initial_transaction :: Transaction.t()
-  def initial_transaction, do: Transaction.new(Version.zero(), %{})
+  @spec initial_transaction :: BedrockTransaction.encoded()
+  def initial_transaction do
+    # Create an empty transaction with no mutations
+    encoded = BedrockTransaction.encode(%{mutations: []})
+    # Add zero version as commit version
+    zero_version = Version.from_integer(0)
+    {:ok, with_version} = BedrockTransaction.add_commit_version(encoded, zero_version)
+    with_version
+  end
 
   @doc """
   Request that the transaction log worker lock itself and stop accepting new

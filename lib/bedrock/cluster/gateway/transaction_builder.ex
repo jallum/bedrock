@@ -124,7 +124,7 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder do
 
   @impl true
   def handle_call(:nested_transaction, _from, t) do
-    %{t | stack: [{t.reads, t.writes} | t.stack], reads: %{}, writes: %{}}
+    %{t | stack: [t.tx | t.stack]}
     |> reply(:ok)
   end
 
@@ -161,5 +161,5 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder do
 
   @spec do_rollback(State.t()) :: :stop | State.t()
   def do_rollback(%{stack: []}), do: :stop
-  def do_rollback(%{stack: [_ | stack]} = t), do: %{t | stack: stack}
+  def do_rollback(%{stack: [tx | stack]} = t), do: %{t | tx: tx, stack: stack}
 end

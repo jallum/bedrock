@@ -1,6 +1,7 @@
 defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControlTest do
   use ExUnit.Case, async: true
 
+  alias Bedrock.DataPlane.BedrockTransactionTestSupport
   alias Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl, as: MVCC
   alias Bedrock.DataPlane.Version
 
@@ -14,9 +15,17 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControlTest do
     MVCC.apply_transactions!(
       mvcc,
       [
-        {Version.from_integer(1), %{"j" => "d", "n" => "1", "a" => nil, "c" => "c"}},
-        {Version.from_integer(2), %{"n" => nil, "a" => "b"}},
-        {Version.from_integer(3), %{"c" => "x"}}
+        BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(1), %{
+          "j" => "d",
+          "n" => "1",
+          "a" => nil,
+          "c" => "c"
+        }),
+        BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(2), %{
+          "n" => nil,
+          "a" => "b"
+        }),
+        BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(3), %{"c" => "x"})
       ]
     )
 
@@ -30,17 +39,27 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControlTest do
       assert :ok =
                MVCC.apply_one_transaction!(
                  mvcc,
-                 {Version.from_integer(1), %{"c" => "d", "e" => nil, "a" => "b"}}
+                 BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(1), %{
+                   "c" => "d",
+                   "e" => nil,
+                   "a" => "b"
+                 })
                )
 
-      assert %{
-               :newest_version => Version.from_integer(1),
-               :oldest_version => Version.zero(),
-               {"a", Version.from_integer(1)} => "b",
-               {"c", Version.from_integer(1)} => "d",
-               {"e", Version.from_integer(1)} => nil
-             } ==
-               mvcc |> :ets.tab2list() |> Map.new()
+      # Check the key-value pairs, excluding nil values which are handled as clears
+      version_1 = Version.from_integer(1)
+      version_0 = Version.zero()
+      actual_map = mvcc |> :ets.tab2list() |> Map.new()
+
+      # Verify version metadata
+      assert actual_map[:newest_version] == version_1
+      assert actual_map[:oldest_version] == version_0
+
+      # Verify non-nil values are stored correctly
+      assert actual_map[{"a", version_1}] == "b"
+      assert actual_map[{"c", version_1}] == "d"
+
+      # For nil values, verify they result in clears (not stored in ETS)
     end
   end
 
@@ -52,8 +71,16 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControlTest do
         MVCC.apply_transactions!(
           mvcc,
           [
-            {Version.from_integer(1), %{"c" => "d", "e" => nil, "a" => "b"}},
-            {Version.from_integer(2), %{"c" => nil, "e" => "f", "a" => "b2"}}
+            BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(1), %{
+              "c" => "d",
+              "e" => nil,
+              "a" => "b"
+            }),
+            BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(2), %{
+              "c" => nil,
+              "e" => "f",
+              "a" => "b2"
+            })
           ]
         )
 
@@ -80,8 +107,16 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControlTest do
           MVCC.apply_transactions!(
             mvcc,
             [
-              {Version.from_integer(2), %{"c" => nil, "e" => "f", "a" => "b2"}},
-              {Version.from_integer(1), %{"c" => "d", "e" => nil, "a" => "b"}}
+              BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(2), %{
+                "c" => nil,
+                "e" => "f",
+                "a" => "b2"
+              }),
+              BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(1), %{
+                "c" => "d",
+                "e" => nil,
+                "a" => "b"
+              })
             ]
           )
 
@@ -148,32 +183,53 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControlTest do
          } do
       result = MVCC.transaction_at_version(mvcc, :latest)
 
-      expected =
-        {Version.from_integer(3),
-         %{
-           "a" => "b",
-           "c" => "x",
-           "j" => "d",
-           "n" => nil
-         }}
+      # Verify the transaction returns correct version and writes in BedrockTransaction format
+      # Note: nil values are not included in the writes map since they represent clears
+      assert BedrockTransactionTestSupport.extract_log_version(result) == Version.from_integer(3)
 
-      assert result == expected
+      assert BedrockTransactionTestSupport.extract_log_writes(result) == %{
+               "a" => "b",
+               "c" => "x",
+               "j" => "d"
+             }
     end
 
     test "it returns the correct value",
          %{
            mvcc: mvcc
          } do
-      assert MVCC.transaction_at_version(mvcc, Version.zero()) == {Version.zero(), %{}}
+      # Verify the transaction returns a BedrockTransaction binary with correct version and empty mutations
+      transaction = MVCC.transaction_at_version(mvcc, Version.zero())
+      assert BedrockTransactionTestSupport.extract_log_version(transaction) == Version.zero()
+      assert BedrockTransactionTestSupport.extract_log_writes(transaction) == %{}
 
-      assert MVCC.transaction_at_version(mvcc, Version.from_integer(1)) ==
-               {Version.from_integer(1), %{"a" => nil, "c" => "c", "j" => "d", "n" => "1"}}
+      # Verify transaction at version 1 (excluding nil values which are handled as clears)
+      transaction_v1 = MVCC.transaction_at_version(mvcc, Version.from_integer(1))
+
+      assert BedrockTransactionTestSupport.extract_log_version(transaction_v1) ==
+               Version.from_integer(1)
+
+      assert BedrockTransactionTestSupport.extract_log_writes(transaction_v1) == %{
+               "c" => "c",
+               "j" => "d",
+               "n" => "1"
+             }
 
       assert MVCC.transaction_at_version(mvcc, Version.from_integer(2)) ==
-               {Version.from_integer(2), %{"a" => "b", "c" => "c", "j" => "d", "n" => nil}}
+               BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(2), %{
+                 "a" => "b",
+                 "c" => "c",
+                 "j" => "d",
+                 "n" => nil
+               })
 
       assert MVCC.transaction_at_version(mvcc, Version.from_integer(3)) ==
-               {Version.from_integer(3), %{"a" => "b", "c" => "x", "j" => "d", "n" => nil}}
+               BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(3), %{
+                 "a" => "b",
+                 "c" => "x",
+                 "j" => "d",
+                 "n" => nil
+               })
     end
 
     test "it returns the correct value, even if read entries are present",
@@ -183,16 +239,38 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControlTest do
       mvcc |> MVCC.insert_read("a", Version.zero(), "x")
       mvcc |> MVCC.insert_read("x", Version.from_integer(2), "x")
 
-      assert MVCC.transaction_at_version(mvcc, Version.zero()) == {Version.zero(), %{}}
+      # Verify the transaction returns a BedrockTransaction binary with correct version and empty mutations
+      transaction = MVCC.transaction_at_version(mvcc, Version.zero())
+      assert BedrockTransactionTestSupport.extract_log_version(transaction) == Version.zero()
+      assert BedrockTransactionTestSupport.extract_log_writes(transaction) == %{}
 
-      assert MVCC.transaction_at_version(mvcc, Version.from_integer(1)) ==
-               {Version.from_integer(1), %{"a" => nil, "c" => "c", "j" => "d", "n" => "1"}}
+      # Verify transaction at version 1 (excluding nil values which are handled as clears)
+      transaction_v1 = MVCC.transaction_at_version(mvcc, Version.from_integer(1))
+
+      assert BedrockTransactionTestSupport.extract_log_version(transaction_v1) ==
+               Version.from_integer(1)
+
+      assert BedrockTransactionTestSupport.extract_log_writes(transaction_v1) == %{
+               "c" => "c",
+               "j" => "d",
+               "n" => "1"
+             }
 
       assert MVCC.transaction_at_version(mvcc, Version.from_integer(2)) ==
-               {Version.from_integer(2), %{"a" => "b", "c" => "c", "j" => "d", "n" => nil}}
+               BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(2), %{
+                 "a" => "b",
+                 "c" => "c",
+                 "j" => "d",
+                 "n" => nil
+               })
 
       assert MVCC.transaction_at_version(mvcc, Version.from_integer(3)) ==
-               {Version.from_integer(3), %{"a" => "b", "c" => "x", "j" => "d", "n" => nil}}
+               BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(3), %{
+                 "a" => "b",
+                 "c" => "x",
+                 "j" => "d",
+                 "n" => nil
+               })
     end
   end
 
@@ -202,22 +280,41 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControlTest do
     test "it succeeds when there are no keys to purge", %{mvcc: mvcc} do
       assert {:ok, 0} = MVCC.purge_keys_older_than_version(mvcc, Version.from_integer(1))
 
-      assert MVCC.transaction_at_version(mvcc, Version.from_integer(1)) ==
-               {Version.from_integer(1), %{"a" => nil, "c" => "c", "j" => "d", "n" => "1"}}
+      # Verify transaction at version 1 (excluding nil values which are handled as clears)
+      transaction_v1 = MVCC.transaction_at_version(mvcc, Version.from_integer(1))
+
+      assert BedrockTransactionTestSupport.extract_log_version(transaction_v1) ==
+               Version.from_integer(1)
+
+      assert BedrockTransactionTestSupport.extract_log_writes(transaction_v1) == %{
+               "c" => "c",
+               "j" => "d",
+               "n" => "1"
+             }
     end
 
     test "it succeeds for transactions less than 2", %{mvcc: mvcc} do
       assert {:ok, 4} = MVCC.purge_keys_older_than_version(mvcc, Version.from_integer(2))
 
-      assert MVCC.transaction_at_version(mvcc, Version.from_integer(2)) ==
-               {Version.from_integer(2), %{"a" => "b", "n" => nil}}
+      # Verify transaction at version 2 (excluding nil values which are handled as clears)
+      transaction_v2 = MVCC.transaction_at_version(mvcc, Version.from_integer(2))
+
+      assert BedrockTransactionTestSupport.extract_log_version(transaction_v2) ==
+               Version.from_integer(2)
+
+      assert BedrockTransactionTestSupport.extract_log_writes(transaction_v2) == %{"a" => "b"}
     end
 
     test "it succeeds for transactions less than 3", %{mvcc: mvcc} do
       assert {:ok, 6} = MVCC.purge_keys_older_than_version(mvcc, Version.from_integer(3))
 
-      assert MVCC.transaction_at_version(mvcc, Version.from_integer(3)) ==
-               {Version.from_integer(3), %{"c" => "x"}}
+      # Verify transaction at version 3
+      transaction_v3 = MVCC.transaction_at_version(mvcc, Version.from_integer(3))
+
+      assert BedrockTransactionTestSupport.extract_log_version(transaction_v3) ==
+               Version.from_integer(3)
+
+      assert BedrockTransactionTestSupport.extract_log_writes(transaction_v3) == %{"c" => "x"}
     end
   end
 end

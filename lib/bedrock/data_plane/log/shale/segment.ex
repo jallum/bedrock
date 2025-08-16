@@ -2,7 +2,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Segment do
   @moduledoc false
   require Logger
 
-  alias Bedrock.DataPlane.Log.EncodedTransaction
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log.Shale.SegmentRecycler
   alias Bedrock.DataPlane.Log.Shale.TransactionStreams
   alias Bedrock.DataPlane.Version
@@ -10,7 +10,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Segment do
   @type t :: %__MODULE__{
           path: String.t(),
           min_version: Bedrock.version(),
-          transactions: nil | [EncodedTransaction.t()]
+          transactions: nil | [BedrockTransaction.encoded()]
         }
   defstruct path: nil,
             min_version: nil,
@@ -88,15 +88,19 @@ defmodule Bedrock.DataPlane.Log.Shale.Segment do
 
   def ensure_transactions_are_loaded(segment), do: segment
 
-  @spec transactions(t()) :: [EncodedTransaction.t()]
+  @spec transactions(t()) :: [BedrockTransaction.encoded()]
   def transactions(%{transactions: nil} = segment),
     do: segment |> ensure_transactions_are_loaded() |> Map.get(:transactions, [])
 
   def transactions(segment), do: segment.transactions
 
   @spec last_version(t()) :: Bedrock.version()
-  def last_version(%{transactions: [<<version::binary-size(8), _::binary>> | _]}),
-    do: version
+  def last_version(%{transactions: [transaction | _]}) do
+    case BedrockTransaction.extract_commit_version(transaction) do
+      {:ok, version} -> version
+      {:error, _} -> nil
+    end
+  end
 
   def last_version(%{min_version: min_version}), do: min_version
 end

@@ -1,6 +1,8 @@
 defmodule Bedrock.Cluster.Gateway.TransactionBuilder.State do
   @moduledoc false
 
+  alias Bedrock.Cluster.Gateway.TransactionBuilder.Tx
+
   @type t :: %__MODULE__{
           state: :valid | :committed | :rolled_back | :expired,
           gateway: pid(),
@@ -12,14 +14,8 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.State do
           read_version_lease_expiration: integer() | nil,
           commit_version: Bedrock.version() | nil,
           #
-          reads: %{Bedrock.key() => Bedrock.value()},
-          writes: %{Bedrock.key() => Bedrock.value()},
-          stack: [
-            %{
-              reads: %{Bedrock.key() => Bedrock.value()},
-              writes: %{Bedrock.key() => Bedrock.value()}
-            }
-          ],
+          tx: Tx.t(),
+          stack: [Tx.t()],
           fastest_storage_servers: %{Bedrock.key_range() => pid()},
           fetch_timeout_in_ms: pos_integer(),
           lease_renewal_threshold: pos_integer()
@@ -34,8 +30,7 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.State do
             read_version_lease_expiration: nil,
             commit_version: nil,
             #
-            reads: %{},
-            writes: %{},
+            tx: Tx.new(),
             stack: [],
             fastest_storage_servers: %{},
             fetch_timeout_in_ms: 50,

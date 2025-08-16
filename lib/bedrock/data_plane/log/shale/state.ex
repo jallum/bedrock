@@ -2,6 +2,7 @@ defmodule Bedrock.DataPlane.Log.Shale.State do
   @moduledoc false
 
   alias Bedrock.ControlPlane.Director
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log.Shale.Segment
   alias Bedrock.DataPlane.Log.Shale.SegmentRecycler
   alias Bedrock.DataPlane.Log.Shale.Writer
@@ -25,7 +26,8 @@ defmodule Bedrock.DataPlane.Log.Shale.State do
           segments: [Segment.t()],
           pending_pushes: %{
             Bedrock.version() =>
-              {encoded_transaction :: binary(), ack_fn :: (:ok | {:error, term()} -> :ok)}
+              {encoded_transaction :: BedrockTransaction.encoded(),
+               ack_fn :: (:ok | {:error, term()} -> :ok)}
           },
           #
           mode: mode(),

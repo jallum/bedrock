@@ -1,5 +1,5 @@
 defmodule Bedrock.DataPlane.Log.Shale.TransactionStreams do
-  alias Bedrock.DataPlane.Log.EncodedTransaction
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log.Shale.Segment
 
   @wal_magic_number <<"BED0">>
@@ -32,17 +32,29 @@ defmodule Bedrock.DataPlane.Log.Shale.TransactionStreams do
     segment
     |> Segment.transactions()
     |> Enum.reverse()
-    |> Enum.drop_while(fn <<version::binary-size(8), _::binary>> -> version < target_version end)
+    |> Enum.drop_while(fn transaction ->
+      case BedrockTransaction.extract_commit_version(transaction) do
+        {:ok, version} -> version < target_version
+        # Skip invalid transactions
+        {:error, _} -> true
+      end
+    end)
     |> case do
-      [<<version::binary-size(8), _::binary>> | rest] when version == target_version ->
-        {:ok, from_list_of_transactions(fn -> rest end)}
+      [transaction | rest] ->
+        case BedrockTransaction.extract_commit_version(transaction) do
+          {:ok, version} when version == target_version ->
+            {:ok, from_list_of_transactions(fn -> rest end)}
+
+          _ ->
+            {:error, :not_found}
+        end
 
       _ ->
         {:error, :not_found}
     end
   end
 
-  @spec from_list_of_transactions((-> [EncodedTransaction.t()] | nil)) :: Enumerable.t()
+  @spec from_list_of_transactions((-> [BedrockTransaction.encoded()] | nil)) :: Enumerable.t()
   def from_list_of_transactions(transactions_fn) do
     Stream.resource(
       transactions_fn,
@@ -67,7 +79,7 @@ defmodule Bedrock.DataPlane.Log.Shale.TransactionStreams do
   append operations can be performed safely.
   """
   @spec from_file!(path_to_file :: String.t()) ::
-          Enumerable.t({EncodedTransaction.t() | :eof | :corrupted, non_neg_integer()})
+          Enumerable.t({BedrockTransaction.encoded() | :eof | :corrupted, non_neg_integer()})
   def from_file!(path_to_file) do
     Stream.resource(
       fn ->
@@ -112,11 +124,13 @@ defmodule Bedrock.DataPlane.Log.Shale.TransactionStreams do
 
   def until_version(stream, last_version) do
     Stream.transform(stream, last_version, fn
-      <<version::binary-size(8), _::binary>> = encoded_transaction, last_version ->
-        if version <= last_version do
-          {[encoded_transaction], last_version}
-        else
-          {:halt, nil}
+      encoded_transaction, last_version ->
+        case BedrockTransaction.extract_commit_version(encoded_transaction) do
+          {:ok, version} when version <= last_version ->
+            {[encoded_transaction], last_version}
+
+          _ ->
+            {:halt, nil}
         end
     end)
   end
@@ -138,17 +152,70 @@ defmodule Bedrock.DataPlane.Log.Shale.TransactionStreams do
   @spec filter_keys_in_range(Enumerable.t(), Bedrock.key_range()) :: Enumerable.t()
   def filter_keys_in_range(stream, nil), do: stream
 
-  def filter_keys_in_range(stream, key_range) do
-    Stream.map(
-      stream,
-      &EncodedTransaction.transform_by_removing_keys_outside_of_range(&1, key_range)
-    )
+  def filter_keys_in_range(stream, {start_key, end_key}) do
+    Stream.map(stream, &filter_transaction_keys(&1, start_key, end_key))
   end
 
   @doc "Excludes transaction values when the flag is true."
   @spec exclude_values(Enumerable.t(), boolean()) :: Enumerable.t()
   def exclude_values(stream, false), do: stream
 
-  def exclude_values(stream, true),
-    do: Stream.map(stream, &EncodedTransaction.transform_by_excluding_values(&1))
+  def exclude_values(stream, true) do
+    Stream.map(stream, &exclude_transaction_values/1)
+  end
+
+  # Helper functions to reduce nesting
+  defp filter_transaction_keys(transaction, start_key, end_key) do
+    case BedrockTransaction.stream_mutations(transaction) do
+      {:ok, mutations_stream} ->
+        filtered_mutations = filter_mutations_by_key_range(mutations_stream, start_key, end_key)
+        rebuild_transaction_with_mutations(transaction, filtered_mutations)
+
+      {:error, _} ->
+        transaction
+    end
+  end
+
+  defp exclude_transaction_values(transaction) do
+    case BedrockTransaction.stream_mutations(transaction) do
+      {:ok, mutations_stream} ->
+        filtered_mutations = exclude_mutation_values(mutations_stream)
+        rebuild_transaction_with_mutations(transaction, filtered_mutations)
+
+      {:error, _} ->
+        transaction
+    end
+  end
+
+  defp filter_mutations_by_key_range(mutations_stream, start_key, end_key) do
+    mutations_stream
+    |> Enum.filter(fn
+      {:set, key, _value} ->
+        key >= start_key and key < end_key
+
+      {:clear, key} ->
+        key >= start_key and key < end_key
+
+      {:clear_range, start_k, end_k} ->
+        # Include if range overlaps with filter range
+        start_k < end_key and end_k > start_key
+    end)
+  end
+
+  defp exclude_mutation_values(mutations_stream) do
+    mutations_stream
+    |> Enum.map(fn
+      {:set, key, _value} -> {:set, key, <<>>}
+      {:clear, key} -> {:clear, key}
+      {:clear_range, start_key, end_key} -> {:clear_range, start_key, end_key}
+    end)
+  end
+
+  defp rebuild_transaction_with_mutations(transaction, filtered_mutations) do
+    {:ok, commit_version} = BedrockTransaction.extract_commit_version(transaction)
+    new_transaction = %{mutations: filtered_mutations}
+    encoded = BedrockTransaction.encode(new_transaction)
+    {:ok, with_version} = BedrockTransaction.add_commit_version(encoded, commit_version)
+    with_version
+  end
 end

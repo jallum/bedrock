@@ -5,8 +5,8 @@ defmodule Bedrock.Cluster do
   alias Bedrock.ControlPlane.Config
   alias Bedrock.ControlPlane.Config.TransactionSystemLayout
   alias Bedrock.ControlPlane.Coordinator
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log
-  alias Bedrock.DataPlane.Log.Transaction
   alias Bedrock.DataPlane.Storage
 
   require Logger
@@ -14,7 +14,7 @@ defmodule Bedrock.Cluster do
   @type t :: module()
   @type name :: String.t()
   @type version :: Bedrock.version()
-  @type transaction :: Transaction.t()
+  @type transaction :: BedrockTransaction.encoded()
   @type storage :: Storage.ref()
   @type log :: Log.ref()
   @type capability :: :coordination | :log | :storage | :resolution

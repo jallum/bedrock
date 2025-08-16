@@ -1,7 +1,7 @@
 defmodule Bedrock.DataPlane.Storage.Basalt.PullingTest do
   use ExUnit.Case, async: false
 
-  alias Bedrock.DataPlane.Log.EncodedTransaction
+  alias Bedrock.DataPlane.BedrockTransactionTestSupport
   alias Bedrock.DataPlane.Storage.Basalt.Pulling
   alias Bedrock.DataPlane.Version
 
@@ -323,8 +323,14 @@ defmodule Bedrock.DataPlane.Storage.Basalt.PullingTest do
       transaction2 = {Version.from_integer(2), %{"key2" => "value2"}}
 
       encoded_txns = [
-        EncodedTransaction.encode(transaction1),
-        EncodedTransaction.encode(transaction2)
+        BedrockTransactionTestSupport.new_log_transaction(
+          elem(transaction1, 0),
+          elem(transaction1, 1)
+        ),
+        BedrockTransactionTestSupport.new_log_transaction(
+          elem(transaction2, 0),
+          elem(transaction2, 1)
+        )
       ]
 
       # Mock log server process
@@ -359,10 +365,14 @@ defmodule Bedrock.DataPlane.Storage.Basalt.PullingTest do
       # Should receive the applied transactions
       assert_receive {:applied_transactions, transactions}, 1000
 
-      # Verify the transactions were decoded correctly
+      # Verify the transactions are in BedrockTransaction binary format
       assert length(transactions) == 2
-      assert {Version.from_integer(1), %{"key1" => "value1"}} in transactions
-      assert {Version.from_integer(2), %{"key2" => "value2"}} in transactions
+      # Decode and verify each transaction
+      [tx1, tx2] = transactions
+      assert BedrockTransactionTestSupport.extract_log_version(tx1) == Version.from_integer(1)
+      assert BedrockTransactionTestSupport.extract_log_writes(tx1) == %{"key1" => "value1"}
+      assert BedrockTransactionTestSupport.extract_log_version(tx2) == Version.from_integer(2)
+      assert BedrockTransactionTestSupport.extract_log_writes(tx2) == %{"key2" => "value2"}
 
       # Clean up
       Process.exit(loop_pid, :kill)

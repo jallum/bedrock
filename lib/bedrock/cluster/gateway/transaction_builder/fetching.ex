@@ -2,6 +2,7 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.Fetching do
   @moduledoc false
 
   alias Bedrock.Cluster.Gateway.TransactionBuilder.State
+  alias Bedrock.Cluster.Gateway.TransactionBuilder.Tx
   alias Bedrock.DataPlane.Storage
   alias Bedrock.Internal.Time
 
@@ -49,33 +50,17 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.Fetching do
            | {:error, :timeout}}
   def do_fetch(t, key, opts \\ []) do
     {:ok, encoded_key} = t.key_codec.encode_key(key)
-
-    with :error <- Map.fetch(t.writes, encoded_key),
-         :error <- Map.fetch(t.reads, encoded_key),
-         :error <- fetch_from_stack(encoded_key, t.stack),
-         {:ok, t, encoded_value} <- fetch_from_storage(t, encoded_key, opts),
-         {:ok, value} <- t.value_codec.decode_value(encoded_value) do
-      {%{t | reads: Map.put(t.reads, encoded_key, value)}, {:ok, value}}
-    else
-      {:ok, _value} = ok -> {t, ok}
-      :error -> {%{t | reads: Map.put(t.reads, encoded_key, :error)}, :error}
-      {:error, :not_found} -> {%{t | reads: Map.put(t.reads, encoded_key, :error)}, :error}
-      error -> {t, error}
+    # Create a fetch function that matches Tx.get expectations: (key, state) -> {result, state}
+    fetch_fn = fn k, state ->
+      case fetch_from_storage(state, k, opts) do
+        {:ok, new_state, value} -> {{:ok, value}, new_state}
+        {:error, reason} -> {{:error, reason}, state}
+        :error -> {:error, state}
+      end
     end
-  end
 
-  @spec fetch_from_stack(Bedrock.key(), [
-          {reads :: %{Bedrock.key() => Bedrock.value()},
-           writes :: %{Bedrock.key() => Bedrock.value()}}
-        ]) ::
-          :error | {:ok, Bedrock.value()}
-  def fetch_from_stack(_, []), do: :error
-
-  def fetch_from_stack(key, [{reads, writes} | stack]) do
-    with :error <- Map.fetch(writes, key),
-         :error <- Map.fetch(reads, key) do
-      fetch_from_stack(key, stack)
-    end
+    {tx, result, t} = Tx.get(t.tx, encoded_key, fetch_fn, t)
+    {%{t | tx: tx}, result}
   end
 
   @spec fetch_from_storage(

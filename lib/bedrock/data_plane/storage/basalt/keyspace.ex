@@ -11,7 +11,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Keyspace do
   of the insert operation).
   """
 
-  alias Bedrock.DataPlane.Log.Transaction
+  alias Bedrock.DataPlane.BedrockTransaction
 
   @opaque t :: :ets.tid()
 
@@ -25,17 +25,21 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Keyspace do
     :ok
   end
 
-  @spec apply_transaction(keyspace :: t(), Transaction.t()) :: :ok
-  def apply_transaction(keyspace, transaction) do
-    with true <-
-           :ets.insert(keyspace, [
-             {:last_version, Transaction.version(transaction)}
-             | Transaction.key_values(transaction)
-               |> Enum.map(fn
-                 {key, nil} -> {key, false}
-                 {key, _value} -> {key, true}
-               end)
-           ]) do
+  @spec apply_transaction(keyspace :: t(), BedrockTransaction.encoded()) :: :ok
+  def apply_transaction(keyspace, encoded_transaction) do
+    {:ok, version} = BedrockTransaction.extract_commit_version(encoded_transaction)
+    {:ok, mutations_stream} = BedrockTransaction.stream_mutations(encoded_transaction)
+
+    # Convert mutations to key presence indicators
+    key_entries =
+      mutations_stream
+      |> Enum.map(fn
+        {:set, key, _value} -> {key, true}
+        # Treat as single key clear for simplicity
+        {:clear_range, key, _end} -> {key, false}
+      end)
+
+    with true <- :ets.insert(keyspace, [{:last_version, version} | key_entries]) do
       :ok
     end
   end

@@ -1,7 +1,7 @@
 defmodule Bedrock.DataPlane.Storage.Basalt.PersistentKeyValues do
   @moduledoc false
 
-  alias Bedrock.DataPlane.Log.Transaction
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Version
 
   @opaque t :: :dets.tab_name()
@@ -54,18 +54,33 @@ defmodule Bedrock.DataPlane.Storage.Basalt.PersistentKeyValues do
   Apply a transaction to the key-value store, atomically. The transaction must
   be applied in order.
   """
-  @spec apply_transaction(pkv :: t(), Transaction.t()) ::
+  @spec apply_transaction(pkv :: t(), BedrockTransaction.encoded()) ::
           :ok
           | {:error, :version_too_new}
           | {:error, :version_too_old}
-  @spec apply_transaction(t(), Transaction.t()) ::
+  @spec apply_transaction(t(), BedrockTransaction.encoded()) ::
           :ok | {:error, :version_too_new} | {:error, :version_too_old}
-  def apply_transaction(pkv, transaction) do
-    version = Transaction.version(transaction)
+  def apply_transaction(pkv, encoded_transaction) do
+    {:ok, version} = BedrockTransaction.extract_commit_version(encoded_transaction)
     last_version = last_version(pkv)
 
+    # Extract mutations and convert to key-value writes
+    writes =
+      case BedrockTransaction.stream_mutations(encoded_transaction) do
+        {:ok, mutations_stream} ->
+          mutations_stream
+          |> Enum.reduce([], fn
+            {:set, key, value}, acc -> [{key, value} | acc]
+            # Treat as single key clear
+            {:clear_range, key, _end}, acc -> [{key, nil} | acc]
+          end)
+
+        {:error, :section_not_found} ->
+          # No mutations section means no mutations
+          []
+      end
+
     with :ok <- check_version(version, last_version),
-         writes <- Transaction.key_values(transaction) |> Enum.to_list(),
          :ok <- :dets.insert(pkv, [{:last_version, version} | writes]) do
       :dets.sync(pkv)
     end

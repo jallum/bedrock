@@ -1,7 +1,9 @@
 defmodule Bedrock.DataPlane.Log.TelemetryTest do
   use ExUnit.Case, async: true
 
+  alias Bedrock.DataPlane.BedrockTransactionTestSupport
   alias Bedrock.DataPlane.Log.Telemetry
+  alias Bedrock.DataPlane.Version
 
   setup do
     # Capture telemetry events
@@ -29,25 +31,28 @@ defmodule Bedrock.DataPlane.Log.TelemetryTest do
 
   describe "trace_push_transaction/2" do
     test "emits push telemetry event with correct data" do
-      expected_version = 42
-      n_keys = 5
+      encoded_transaction =
+        BedrockTransactionTestSupport.new_log_transaction(
+          Version.from_integer(42),
+          %{"key1" => "value1", "key2" => "value2"}
+        )
 
-      Telemetry.trace_push_transaction(expected_version, n_keys)
+      Telemetry.trace_push_transaction(encoded_transaction)
 
-      assert_receive {:telemetry, [:bedrock, :log, :push], %{n_keys: ^n_keys},
+      assert_receive {:telemetry, [:bedrock, :log, :push], %{},
                       %{
-                        expected_version: ^expected_version,
                         cluster: :test_cluster,
                         id: "test_log",
-                        otp_name: :test_otp
+                        otp_name: :test_otp,
+                        transaction: ^encoded_transaction
                       }}
     end
   end
 
   describe "trace_push_out_of_order/2" do
     test "emits push_out_of_order telemetry event with version information" do
-      expected_version = 35
-      current_version = 42
+      expected_version = Version.from_integer(35)
+      current_version = Version.from_integer(42)
 
       Telemetry.trace_push_out_of_order(expected_version, current_version)
 

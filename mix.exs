@@ -40,7 +40,6 @@ defmodule Bedrock.MixProject do
   defp deps do
     [
       {:bedrock_raft, git: "https://github.com/jallum/bedrock_raft.git", tag: "0.9.6"},
-      {:gearbox, "~> 0.3"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.2"}
     ]

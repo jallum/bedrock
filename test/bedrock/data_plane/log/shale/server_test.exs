@@ -2,7 +2,7 @@ defmodule Bedrock.DataPlane.Log.Shale.ServerTest do
   use ExUnit.Case, async: false
 
   alias Bedrock.Cluster
-  alias Bedrock.DataPlane.Log.EncodedTransaction
+  alias Bedrock.DataPlane.BedrockTransactionTestSupport
   alias Bedrock.DataPlane.Log.Shale.Server
   alias Bedrock.DataPlane.Log.Shale.State
   alias Bedrock.DataPlane.Version
@@ -247,8 +247,9 @@ defmodule Bedrock.DataPlane.Log.Shale.ServerTest do
     test "handles push with valid transaction format", %{server: pid} do
       # Create a minimally valid encoded transaction using the proper structure
       # Start with version 0 to match server's initial last_version
-      transaction = {0, %{"test_key" => "test_value"}}
-      encoded_bytes = EncodedTransaction.encode(transaction)
+      encoded_bytes =
+        BedrockTransactionTestSupport.new_log_transaction(0, %{"test_key" => "test_value"})
+
       # Match server's initial last_version
       expected_version = 0
 

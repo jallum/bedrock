@@ -1,8 +1,8 @@
 defmodule Bedrock.DataPlane.Log.Shale.Server do
   @moduledoc false
   alias Bedrock.Cluster
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log
-  alias Bedrock.DataPlane.Log.EncodedTransaction
   alias Bedrock.DataPlane.Log.Shale.Segment
   alias Bedrock.DataPlane.Log.Shale.SegmentRecycler
   alias Bedrock.DataPlane.Log.Shale.State
@@ -83,7 +83,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Server do
   @impl true
   @spec handle_continue(
           :initialization
-          | {:notify_waiting_pullers, Bedrock.version(), EncodedTransaction.t()}
+          | {:notify_waiting_pullers, Bedrock.version(), BedrockTransaction.encoded()}
           | :check_for_expired_pullers
           | :wait_for_next_puller_deadline,
           State.t()
@@ -206,7 +206,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Server do
 
   @impl true
   def handle_call({:push, transaction_bytes, expected_version}, from, %State{} = t) do
-    with {:ok, transaction} <- EncodedTransaction.validate(transaction_bytes),
+    with {:ok, transaction} <- BedrockTransaction.validate(transaction_bytes),
          {:ok, t} <- push(t, expected_version, transaction, ack_fn(from)) do
       t |> noreply(continue: {:notify_waiting_pullers, expected_version, transaction})
     else

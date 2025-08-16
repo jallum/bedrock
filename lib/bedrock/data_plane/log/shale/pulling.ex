@@ -1,8 +1,8 @@
 defmodule Bedrock.DataPlane.Log.Shale.Pulling do
   @moduledoc false
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log.Shale.Segment
   alias Bedrock.DataPlane.Log.Shale.State
-  alias Bedrock.DataPlane.Log.Transaction
 
   import Bedrock.DataPlane.Log.Shale.TransactionStreams
 
@@ -17,7 +17,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Pulling do
             recovery: boolean()
           ]
         ) ::
-          {:ok, State.t(), [Transaction.t()]}
+          {:ok, State.t(), [BedrockTransaction.encoded()]}
           | {:waiting_for, Bedrock.version()}
           | {:error, :not_ready}
           | {:error, :not_locked}

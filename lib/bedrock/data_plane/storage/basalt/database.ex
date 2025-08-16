@@ -1,7 +1,7 @@
 defmodule Bedrock.DataPlane.Storage.Basalt.Database do
   @moduledoc false
 
-  alias Bedrock.DataPlane.Log.Transaction
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Storage.Basalt.Keyspace
   alias Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl, as: MVCC
   alias Bedrock.DataPlane.Storage.Basalt.PersistentKeyValues
@@ -66,10 +66,10 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Database do
     |> Stream.run()
   end
 
-  @spec apply_transactions(database :: t(), transactions :: [Transaction.t()]) ::
+  @spec apply_transactions(database :: t(), transactions :: [BedrockTransaction.encoded()]) ::
           Bedrock.version()
-  def apply_transactions(database, transactions),
-    do: MVCC.apply_transactions!(database.mvcc, transactions)
+  def apply_transactions(database, encoded_transactions),
+    do: MVCC.apply_transactions!(database.mvcc, encoded_transactions)
 
   @spec last_committed_version(t()) :: Bedrock.version()
   def last_committed_version(database),

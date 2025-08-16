@@ -1,8 +1,9 @@
 defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
   use ExUnit.Case, async: true
 
+  alias Bedrock.DataPlane.BedrockTransactionTestSupport
   alias Bedrock.DataPlane.CommitProxy.Finalization
-  alias Bedrock.DataPlane.Log.Transaction
+  alias Bedrock.DataPlane.Version
   alias FinalizationTestSupport, as: Support
 
   describe "push_transaction_to_logs" do
@@ -13,7 +14,10 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       }
 
       transactions_by_tag = %{
-        0 => Transaction.new(100, %{<<"key">> => <<"value">>})
+        0 =>
+          BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(100), %{
+            <<"key">> => <<"value">>
+          })
       }
 
       # Mock that tracks timeout usage
@@ -28,9 +32,9 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
 
       Finalization.push_transaction_to_logs(
         transaction_system_layout,
-        99,
+        Version.from_integer(99),
         transactions_by_tag,
-        100,
+        Version.from_integer(100),
         async_stream_fn: mock_async_stream_fn,
         # Custom timeout
         timeout: 2500
@@ -46,7 +50,10 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       }
 
       transactions_by_tag = %{
-        0 => Transaction.new(100, %{<<"key">> => <<"value">>})
+        0 =>
+          BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(100), %{
+            <<"key">> => <<"value">>
+          })
       }
 
       test_pid = self()
@@ -64,14 +71,15 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       result_success =
         Finalization.push_transaction_to_logs(
           transaction_system_layout,
-          99,
+          Version.from_integer(99),
           transactions_by_tag,
-          100,
+          Version.from_integer(100),
           log_push_fn: custom_log_push_fn_success
         )
 
       assert result_success == :ok
-      assert_receive {:custom_push_called, _service_descriptor, _encoded_transaction, 99}
+      version_99 = Version.from_integer(99)
+      assert_receive {:custom_push_called, _service_descriptor, _encoded_transaction, ^version_99}
 
       # Test failure case
       custom_log_push_fn_failure = fn _service_descriptor, _encoded_transaction, _last_version ->
@@ -81,9 +89,9 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       result_failure =
         Finalization.push_transaction_to_logs(
           transaction_system_layout,
-          99,
+          Version.from_integer(99),
           transactions_by_tag,
-          100,
+          Version.from_integer(100),
           log_push_fn: custom_log_push_fn_failure
         )
 
@@ -105,7 +113,10 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       }
 
       transactions_by_tag = %{
-        0 => Transaction.new(100, %{<<"key1">> => <<"value1">>})
+        0 =>
+          BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(100), %{
+            <<"key1">> => <<"value1">>
+          })
       }
 
       # Mock that returns first log failure, others would succeed
@@ -119,9 +130,9 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       result =
         Finalization.push_transaction_to_logs(
           transaction_system_layout,
-          99,
+          Version.from_integer(99),
           transactions_by_tag,
-          100,
+          Version.from_integer(100),
           async_stream_fn: mock_async_stream_fn
         )
 
@@ -138,15 +149,18 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       }
 
       transactions_by_tag = %{
-        0 => Transaction.new(100, %{<<"key">> => <<"value">>})
+        0 =>
+          BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(100), %{
+            <<"key">> => <<"value">>
+          })
       }
 
       result =
         Finalization.push_transaction_to_logs(
           transaction_system_layout,
-          99,
+          Version.from_integer(99),
           transactions_by_tag,
-          100
+          Version.from_integer(100)
         )
 
       assert result == :ok
@@ -166,9 +180,9 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       result =
         Finalization.push_transaction_to_logs(
           transaction_system_layout,
-          99,
+          Version.from_integer(99),
           transactions_by_tag,
-          100
+          Version.from_integer(100)
         )
 
       assert result == :ok
@@ -178,8 +192,14 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       transaction_system_layout = Support.multi_log_transaction_system_layout()
 
       transactions_by_tag = %{
-        0 => Transaction.new(100, %{<<"key1">> => <<"value1">>}),
-        1 => Transaction.new(100, %{<<"key2">> => <<"value2">>})
+        0 =>
+          BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(100), %{
+            <<"key1">> => <<"value1">>
+          }),
+        1 =>
+          BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(100), %{
+            <<"key2">> => <<"value2">>
+          })
       }
 
       # Mock async stream that simulates 2/3 success (but we need ALL now)
@@ -194,9 +214,9 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       result =
         Finalization.push_transaction_to_logs(
           transaction_system_layout,
-          99,
+          Version.from_integer(99),
           transactions_by_tag,
-          100,
+          Version.from_integer(100),
           async_stream_fn: mock_async_stream_fn
         )
 
@@ -211,13 +231,16 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       }
 
       transactions_by_tag = %{
-        0 => Transaction.new(175, %{<<"key">> => <<"value">>})
+        0 =>
+          BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(175), %{
+            <<"key">> => <<"value">>
+          })
       }
 
       # Use NON-SEQUENTIAL version numbers to verify proper version chain handling
-      commit_version = 175
+      commit_version = Version.from_integer(175)
       # Intentional gap to verify sequencer values are used
-      last_commit_version = 168
+      last_commit_version = Version.from_integer(168)
 
       test_pid = self()
 
@@ -263,7 +286,10 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       }
 
       transactions_by_tag = %{
-        0 => Transaction.new(100, %{<<"key1">> => <<"value1">>})
+        0 =>
+          BedrockTransactionTestSupport.new_log_transaction(Version.from_integer(100), %{
+            <<"key1">> => <<"value1">>
+          })
       }
 
       # Mock async stream that only yields 2 out of 3 required responses
@@ -279,9 +305,9 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationLogPushTest do
       result =
         Finalization.push_transaction_to_logs(
           transaction_system_layout,
-          99,
+          Version.from_integer(99),
           transactions_by_tag,
-          100,
+          Version.from_integer(100),
           async_stream_fn: mock_async_stream_fn
         )
 

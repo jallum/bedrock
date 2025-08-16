@@ -1,6 +1,7 @@
 defmodule Bedrock.DataPlane.CommitProxy.FinalizationCoreTest do
   use ExUnit.Case, async: true
 
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.CommitProxy.Finalization
   alias FinalizationTestSupport, as: Support
 
@@ -29,15 +30,33 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationCoreTest do
       reply_fn1 = fn result -> send(self(), {:reply1, result}) end
       reply_fn2 = fn result -> send(self(), {:reply2, result}) end
 
+      # Create binary transactions
+      tx1_map = %{
+        mutations: [{:set, <<"key1">>, <<"value1">>}],
+        write_conflicts: [{<<"key1">>, <<"key1\0">>}],
+        read_conflicts: [],
+        read_version: nil
+      }
+
+      tx2_map = %{
+        mutations: [{:set, <<"key2">>, <<"value2">>}],
+        write_conflicts: [{<<"key2">>, <<"key2\0">>}],
+        read_conflicts: [],
+        read_version: nil
+      }
+
+      tx1_binary = BedrockTransaction.encode(tx1_map)
+      tx2_binary = BedrockTransaction.encode(tx2_map)
+
       batch = %Bedrock.DataPlane.CommitProxy.Batch{
-        commit_version: 100,
-        last_commit_version: 99,
+        commit_version: Bedrock.DataPlane.Version.from_integer(100),
+        last_commit_version: Bedrock.DataPlane.Version.from_integer(99),
         n_transactions: 2,
         buffer: [
           # index 0 - will be aborted
-          {reply_fn1, {nil, %{<<"key1">> => <<"value1">>}}},
+          {reply_fn1, tx1_binary},
           # index 1 - success
-          {reply_fn2, {nil, %{<<"key2">> => <<"value2">>}}}
+          {reply_fn2, tx2_binary}
         ]
       }
 
@@ -61,14 +80,15 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationCoreTest do
 
       assert {:ok, 1, 1} = result
 
+      expected_version = Bedrock.DataPlane.Version.from_integer(100)
       assert_receive {:reply1, {:error, :aborted}}
-      assert_receive {:reply2, {:ok, 100}}
+      assert_receive {:reply2, {:ok, ^expected_version}}
     end
 
     test "handles empty batch", %{transaction_system_layout: transaction_system_layout} do
       batch = %Bedrock.DataPlane.CommitProxy.Batch{
-        commit_version: 100,
-        last_commit_version: 99,
+        commit_version: Bedrock.DataPlane.Version.from_integer(100),
+        last_commit_version: Bedrock.DataPlane.Version.from_integer(99),
         n_transactions: 0,
         buffer: []
       }
@@ -100,13 +120,30 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationCoreTest do
       reply_fn1 = fn result -> send(self(), {:reply1, result}) end
       reply_fn2 = fn result -> send(self(), {:reply2, result}) end
 
+      transaction_map1 = %{
+        mutations: [{:set, <<"key1">>, <<"value1">>}],
+        write_conflicts: [{<<"key1">>, <<"key1\0">>}],
+        read_conflicts: [],
+        read_version: nil
+      }
+
+      transaction_map2 = %{
+        mutations: [{:set, <<"key2">>, <<"value2">>}],
+        write_conflicts: [{<<"key2">>, <<"key2\0">>}],
+        read_conflicts: [],
+        read_version: nil
+      }
+
+      binary_transaction1 = BedrockTransaction.encode(transaction_map1)
+      binary_transaction2 = BedrockTransaction.encode(transaction_map2)
+
       batch = %Bedrock.DataPlane.CommitProxy.Batch{
-        commit_version: 100,
-        last_commit_version: 99,
+        commit_version: Bedrock.DataPlane.Version.from_integer(100),
+        last_commit_version: Bedrock.DataPlane.Version.from_integer(99),
         n_transactions: 2,
         buffer: [
-          {reply_fn1, {nil, %{<<"key1">> => <<"value1">>}}},
-          {reply_fn2, {nil, %{<<"key2">> => <<"value2">>}}}
+          {reply_fn1, binary_transaction1},
+          {reply_fn2, binary_transaction2}
         ]
       }
 
@@ -207,6 +244,10 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationCoreTest do
       last_commit_version = 142
 
       batch = Support.create_test_batch(commit_version, last_commit_version)
+
+      # Convert to binary versions for assertions since system uses Bedrock.version() format
+      commit_version_binary = Bedrock.DataPlane.Version.from_integer(commit_version)
+      last_commit_version_binary = Bedrock.DataPlane.Version.from_integer(last_commit_version)
       test_pid = self()
 
       # Mock resolver that captures the exact last_version passed to it
@@ -237,12 +278,12 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationCoreTest do
       assert {:ok, 0, 1} = result
 
       # Verify resolver received the exact last_commit_version from batch
-      assert_receive {:resolver_called, ^last_commit_version, ^commit_version}
+      assert_receive {:resolver_called, ^last_commit_version_binary, ^commit_version_binary}
 
       # Verify log push received the exact last_commit_version from batch
-      assert_receive {:log_push_called, ^last_commit_version, ^commit_version}
+      assert_receive {:log_push_called, ^last_commit_version_binary, ^commit_version_binary}
 
-      assert_receive {:reply, {:ok, ^commit_version}}
+      assert_receive {:reply, {:ok, ^commit_version_binary}}
     end
   end
 
@@ -258,11 +299,22 @@ defmodule Bedrock.DataPlane.CommitProxy.FinalizationCoreTest do
 
       reply_fn = fn result -> send(self(), {:reply, result}) end
 
+      transaction_map = %{
+        mutations: [{:set, <<"key">>, <<"value">>}],
+        write_conflicts: [{<<"key">>, <<"key\0">>}],
+        read_conflicts: [],
+        read_version: nil
+      }
+
+      binary_transaction = BedrockTransaction.encode(transaction_map)
+
       batch = %Bedrock.DataPlane.CommitProxy.Batch{
-        commit_version: 100,
-        last_commit_version: 99,
+        commit_version: Bedrock.DataPlane.Version.from_integer(100),
+        last_commit_version: Bedrock.DataPlane.Version.from_integer(99),
         n_transactions: 1,
-        buffer: [{reply_fn, {nil, %{<<"key">> => <<"value">>}}}]
+        buffer: [
+          {reply_fn, binary_transaction}
+        ]
       }
 
       # Track calls to custom abort function

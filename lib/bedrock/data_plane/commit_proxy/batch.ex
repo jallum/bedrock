@@ -1,5 +1,8 @@
 defmodule Bedrock.DataPlane.CommitProxy.Batch do
   @moduledoc false
+
+  alias Bedrock.DataPlane.BedrockTransaction
+
   @type reply_fn :: ({:ok, Bedrock.version()} | {:error, :abort} -> :ok)
 
   @type t :: %__MODULE__{
@@ -40,7 +43,7 @@ defmodule Bedrock.DataPlane.CommitProxy.Batch do
   def all_callers(t),
     do: t.buffer |> Enum.map(&elem(&1, 0))
 
-  @spec add_transaction(t(), Bedrock.transaction(), reply_fn()) :: t()
+  @spec add_transaction(t(), BedrockTransaction.encoded(), reply_fn()) :: t()
   def add_transaction(t, transaction, reply_fn),
     do: %{t | buffer: [{reply_fn, transaction} | t.buffer], n_transactions: t.n_transactions + 1}
 

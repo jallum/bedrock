@@ -1,6 +1,6 @@
 defmodule Bedrock.DataPlane.Log.Shale.Pushing do
   @moduledoc false
-  alias Bedrock.DataPlane.Log.EncodedTransaction
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log.Shale.Segment
   alias Bedrock.DataPlane.Log.Shale.State
   alias Bedrock.DataPlane.Log.Shale.Writer
@@ -10,7 +10,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Pushing do
   @spec push(
           t :: State.t(),
           expected_version :: Bedrock.version(),
-          encoded_transaction :: EncodedTransaction.t(),
+          encoded_transaction :: BedrockTransaction.encoded(),
           ack_fn :: (:ok | {:error, term()} -> :ok)
         ) :: {:ok | :wait, State.t()} | {:error, :tx_out_of_order} | {:error, :tx_too_large}
   def push(_, _, encoded_transaction, _ack_fn)
@@ -22,8 +22,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Pushing do
       when expected_version == t.last_version do
     case write_encoded_transaction(t, encoded_transaction) do
       {:ok, t} ->
-        n_keys = EncodedTransaction.key_count(encoded_transaction)
-        trace_push_transaction(expected_version, n_keys)
+        trace_push_transaction(encoded_transaction)
         :ok = ack_fn.(:ok)
         t |> do_pending_pushes()
     end
@@ -59,11 +58,19 @@ defmodule Bedrock.DataPlane.Log.Shale.Pushing do
     end
   end
 
-  @spec write_encoded_transaction(State.t(), EncodedTransaction.t()) ::
+  @spec write_encoded_transaction(State.t(), BedrockTransaction.encoded()) ::
           {:ok, State.t()} | {:error, term()}
   def write_encoded_transaction(t, encoded_transaction)
       when is_nil(t.writer) do
-    version = EncodedTransaction.version(encoded_transaction)
+    # Extract version from BedrockTransaction transaction_id section
+    version =
+      case BedrockTransaction.extract_transaction_id(encoded_transaction) do
+        {:ok, version} ->
+          version
+
+        {:error, reason} ->
+          raise "Failed to extract version: #{inspect(reason)}"
+      end
 
     with {:ok, new_segment} <-
            Segment.allocate_from_recycler(
@@ -85,8 +92,14 @@ defmodule Bedrock.DataPlane.Log.Shale.Pushing do
   def write_encoded_transaction(t, encoded_transaction) do
     case Writer.append(t.writer, encoded_transaction) do
       {:ok, writer} ->
-        version = EncodedTransaction.version(encoded_transaction)
-        {:ok, %{t | writer: writer, last_version: version}}
+        # Extract version from BedrockTransaction transaction_id section
+        case BedrockTransaction.extract_transaction_id(encoded_transaction) do
+          {:ok, version} ->
+            {:ok, %{t | writer: writer, last_version: version}}
+
+          {:error, reason} ->
+            {:error, {:version_extraction_failed, reason}}
+        end
 
       {:error, :segment_full} ->
         with :ok <- Writer.close(t.writer) do

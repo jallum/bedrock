@@ -1,7 +1,7 @@
 defmodule Bedrock.DataPlane.Log.Shale.RecoveryTest do
   use ExUnit.Case, async: true
 
-  alias Bedrock.DataPlane.Log.EncodedTransaction
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log.Shale.Recovery
   alias Bedrock.DataPlane.Log.Shale.SegmentRecycler
   alias Bedrock.DataPlane.Log.Shale.State
@@ -109,7 +109,7 @@ defmodule Bedrock.DataPlane.Log.Shale.RecoveryTest do
     test "handles invalid transaction data", %{state: state} do
       source_log = setup_mock_log(["invalid"])
 
-      assert {:error, :invalid_transaction} =
+      assert {:error, :invalid_format} =
                Recovery.pull_transactions(
                  state,
                  source_log,
@@ -120,7 +120,23 @@ defmodule Bedrock.DataPlane.Log.Shale.RecoveryTest do
   end
 
   # Helper functions
-  defp create_encoded_tx(version, data), do: EncodedTransaction.encode({version, data})
+  defp create_encoded_tx(version, data) do
+    # Convert data map to mutations format
+    mutations = Enum.map(data, fn {key, value} -> {:set, key, value} end)
+
+    # Create BedrockTransaction
+    transaction = %{
+      mutations: mutations,
+      read_conflicts: [],
+      write_conflicts: [],
+      read_version: nil
+    }
+
+    # Encode and add version as transaction_id
+    encoded = BedrockTransaction.encode(transaction)
+    {:ok, encoded_with_id} = BedrockTransaction.add_transaction_id(encoded, version)
+    encoded_with_id
+  end
 
   defp setup_mock_log(transactions) do
     spawn_link(fn ->

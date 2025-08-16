@@ -17,12 +17,16 @@ defmodule Bedrock do
   @type version :: Bedrock.DataPlane.Version.t()
   @type version_vector :: {oldest :: version(), newest :: version()}
 
-  @type transaction ::
-          {reads :: nil | {version(), [key() | key_range()]},
-           writes :: %{
-             key() => value(),
-             key_range() => value() | nil
-           }}
+  @type transaction :: %{
+          optional(:mutations) => [mutation()],
+          optional(:write_conflicts) => [key_range()],
+          optional(:read_conflicts) => {version(), [key_range()]},
+          optional(:commit_version) => version()
+        }
+
+  @type mutation ::
+          {:set, key(), value()}
+          | {:clear_range, key(), key()}
 
   @type epoch :: non_neg_integer()
   @type quorum :: pos_integer()

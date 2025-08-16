@@ -2,16 +2,17 @@ defmodule Bedrock.DataPlane.Resolver.Server do
   @moduledoc """
   GenServer implementation for the Resolver conflict detection engine.
 
-  Manages resolver state including locked/running modes, version ordering through
-  waiting queues, and coordination with recovery processes. Handles out-of-order
-  transaction resolution by queuing later versions until earlier ones complete.
+  Manages resolver state including version ordering through waiting queues.
+  Handles out-of-order transaction resolution by queuing later versions until
+  earlier ones complete.
 
-  Starts in locked mode and requires explicit recovery coordination before
-  processing transaction resolution requests.
+  Starts in running mode and is immediately ready to process transaction
+  resolution requests.
   """
   alias Bedrock.DataPlane.Resolver.State
+  alias Bedrock.DataPlane.Resolver.Tree
+  alias Bedrock.DataPlane.Version
 
-  import Bedrock.DataPlane.Resolver.Recovery, only: [recover_from: 4]
   import Bedrock.DataPlane.Resolver.ConflictResolution, only: [resolve: 3]
 
   use GenServer
@@ -45,25 +46,21 @@ defmodule Bedrock.DataPlane.Resolver.Server do
 
   @impl true
   def init({lock_token}) do
-    %State{lock_token: lock_token}
+    zero_version = Version.zero()
+
+    %State{
+      lock_token: lock_token,
+      tree: %Tree{},
+      oldest_version: zero_version,
+      last_version: zero_version,
+      mode: :running
+    }
     |> then(&{:ok, &1})
   end
 
   @impl true
   def terminate(_reason, _state) do
     :ok
-  end
-
-  @impl true
-  def handle_call({:recover_from, lock_token, source_log, first_version, last_version}, _from, t) do
-    if lock_token == t.lock_token do
-      case recover_from(t, source_log, first_version, last_version) do
-        {:ok, t} -> t |> reply(:ok)
-        {:error, reason} -> t |> reply({:error, reason})
-      end
-    else
-      t |> reply({:error, :unauthorized})
-    end
   end
 
   # When transactions come in order, we can resolve them immediately. Once we're
@@ -90,12 +87,6 @@ defmodule Bedrock.DataPlane.Resolver.Server do
       when t.mode == :running do
     %{t | waiting: Map.put(t.waiting, last_version, {next_version, transactions, reply_fn(from)})}
     |> noreply()
-  end
-
-  # Reject resolve_transactions calls when locked
-  @impl true
-  def handle_call({:resolve_transactions, _versions, _transactions}, _from, %{mode: :locked} = t) do
-    t |> reply({:error, :locked})
   end
 
   @impl true

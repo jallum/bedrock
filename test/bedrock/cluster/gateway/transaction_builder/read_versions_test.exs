@@ -155,9 +155,7 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.ReadVersionsTest do
         transaction_system_layout: %{test: "data"},
         read_version: 12_345,
         read_version_lease_expiration: current_time - 1000,
-        reads: %{"key" => "value"},
-        writes: %{"write_key" => "write_value"},
-        stack: [{%{}, %{}}]
+        stack: []
       }
 
       gateway_fn = fn :test_gateway, 12_345 -> {:ok, 3000} end
@@ -175,8 +173,7 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.ReadVersionsTest do
       assert new_state.gateway == original_state.gateway
       assert new_state.transaction_system_layout == original_state.transaction_system_layout
       assert new_state.read_version == original_state.read_version
-      assert new_state.reads == original_state.reads
-      assert new_state.writes == original_state.writes
+      assert new_state.tx == original_state.tx
       assert new_state.stack == original_state.stack
     end
 

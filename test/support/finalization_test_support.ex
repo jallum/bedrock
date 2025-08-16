@@ -3,6 +3,9 @@ defmodule FinalizationTestSupport do
   Shared test utilities and fixtures for finalization tests.
   """
 
+  alias Bedrock.DataPlane.BedrockTransaction
+  alias Bedrock.DataPlane.Version
+
   # Mock cluster module for testing
   defmodule TestCluster do
     @moduledoc false
@@ -83,8 +86,29 @@ defmodule FinalizationTestSupport do
   Creates a test batch with given parameters.
   """
   def create_test_batch(commit_version, last_commit_version, transactions \\ []) do
+    # Ensure versions are in proper Bedrock.version() binary format
+    commit_version =
+      if is_integer(commit_version),
+        do: Version.from_integer(commit_version),
+        else: commit_version
+
+    last_commit_version =
+      if is_integer(last_commit_version),
+        do: Version.from_integer(last_commit_version),
+        else: last_commit_version
+
+    # Create binary transaction using BedrockTransaction encoding
+    default_transaction_map = %{
+      mutations: [{:set, <<"key1">>, <<"value1">>}],
+      write_conflicts: [{<<"key1">>, <<"key1\0">>}],
+      read_conflicts: [],
+      read_version: nil
+    }
+
+    default_binary = BedrockTransaction.encode(default_transaction_map)
+
     default_transactions = [
-      {fn result -> send(self(), {:reply, result}) end, {nil, %{<<"key1">> => <<"value1">>}}}
+      {fn result -> send(self(), {:reply, result}) end, default_binary}
     ]
 
     buffer = if Enum.empty?(transactions), do: default_transactions, else: transactions

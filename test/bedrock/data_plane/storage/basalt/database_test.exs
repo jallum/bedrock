@@ -1,7 +1,7 @@
 defmodule Bedrock.DataPlane.Storage.Basalt.DatabaseTest do
   use ExUnit.Case, async: true
 
-  alias Bedrock.DataPlane.Log.Transaction
+  alias Bedrock.DataPlane.BedrockTransactionTestSupport
   alias Bedrock.DataPlane.Storage.Basalt.Database
   alias Bedrock.DataPlane.Version
 
@@ -47,19 +47,30 @@ defmodule Bedrock.DataPlane.Storage.Basalt.DatabaseTest do
       version_2 = Version.from_integer(2)
       version_3 = Version.from_integer(3)
 
-      assert ^version_0 = Database.apply_transactions(db, [Transaction.new(version_0, %{})])
+      assert ^version_0 =
+               Database.apply_transactions(db, [
+                 BedrockTransactionTestSupport.new_log_transaction(version_0, %{})
+               ])
 
       assert ^version_1 =
-               Database.apply_transactions(db, [Transaction.new(version_1, %{"foo" => "bar"})])
+               Database.apply_transactions(db, [
+                 BedrockTransactionTestSupport.new_log_transaction(version_1, %{"foo" => "bar"})
+               ])
 
       assert ^version_2 =
                Database.apply_transactions(db, [
-                 Transaction.new(version_2, %{"foo" => "baz", "boo" => "bif"})
+                 BedrockTransactionTestSupport.new_log_transaction(version_2, %{
+                   "foo" => "baz",
+                   "boo" => "bif"
+                 })
                ])
 
       assert ^version_3 =
                Database.apply_transactions(db, [
-                 Transaction.new(version_3, %{"foo" => "biz", "bam" => "bom"})
+                 BedrockTransactionTestSupport.new_log_transaction(version_3, %{
+                   "foo" => "biz",
+                   "bam" => "bom"
+                 })
                ])
 
       assert ^version_0 = Database.last_durable_version(db)

@@ -4,7 +4,7 @@ defmodule Bedrock.DataPlane.Version do
   Versions are 8-byte big-endian unsigned integers.
   """
 
-  @opaque t :: binary()
+  @type t :: binary()
 
   # Version constants
   @zero_version <<0::unsigned-big-64>>

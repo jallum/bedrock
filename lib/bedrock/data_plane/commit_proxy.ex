@@ -24,6 +24,7 @@ defmodule Bedrock.DataPlane.CommitProxy do
   """
 
   alias Bedrock.ControlPlane.Config.TransactionSystemLayout
+  alias Bedrock.DataPlane.BedrockTransaction
 
   use Bedrock.Internal.GenServerApi, for: __MODULE__.Server
 
@@ -37,7 +38,7 @@ defmodule Bedrock.DataPlane.CommitProxy do
   def recover_from(commit_proxy, lock_token, transaction_system_layout),
     do: call(commit_proxy, {:recover_from, lock_token, transaction_system_layout}, :infinity)
 
-  @spec commit(commit_proxy_ref :: ref(), transaction :: Bedrock.transaction()) ::
+  @spec commit(commit_proxy_ref :: ref(), transaction :: BedrockTransaction.encoded()) ::
           {:ok, version :: Bedrock.version()} | {:error, :timeout | :unavailable}
   def commit(commit_proxy, transaction),
     do: call(commit_proxy, {:commit, transaction}, :infinity)

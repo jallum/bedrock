@@ -5,7 +5,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl do
   provides an implementation of MVCC for Basalt.
   """
 
-  alias Bedrock.DataPlane.Log.Transaction
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Version
 
   @opaque t :: :ets.table()
@@ -44,27 +44,29 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl do
   """
   @spec apply_transactions!(
           mvcc :: t(),
-          transactions :: [Transaction.t()]
+          transactions :: [BedrockTransaction.encoded()]
         ) ::
           Bedrock.version()
-  @spec apply_transactions!(t(), [Transaction.t()]) :: :ok
-  def apply_transactions!(mvcc, transactions) do
+  @spec apply_transactions!(t(), [BedrockTransaction.encoded()]) :: :ok
+  def apply_transactions!(mvcc, encoded_transactions) do
     latest_version = mvcc |> newest_version()
 
-    transactions
-    |> Enum.reduce(latest_version, fn
-      {version, _kv_pairs}, latest_version
-      when version < latest_version ->
-        raise "Transactions must be applied in order (new #{Version.to_string(version)}, old #{Version.to_string(latest_version)})"
+    encoded_transactions
+    |> Enum.reduce(latest_version, fn encoded_transaction, latest_version ->
+      {:ok, version} = BedrockTransaction.extract_commit_version(encoded_transaction)
 
-      {version, _kv_pairs}, latest_version
-      when version == latest_version ->
-        # Skip duplicate version - already applied
-        latest_version
+      cond do
+        version < latest_version ->
+          raise "Transactions must be applied in order (new #{Version.to_string(version)}, old #{Version.to_string(latest_version)})"
 
-      {version, _kv_pairs} = transaction, _latest_version ->
-        :ok = apply_one_transaction!(mvcc, transaction)
-        version
+        version == latest_version ->
+          # Skip duplicate version - already applied
+          latest_version
+
+        true ->
+          :ok = apply_one_transaction!(mvcc, encoded_transaction)
+          version
+      end
     end)
   end
 
@@ -72,8 +74,31 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl do
   Apply a single transaction to the given table, atomically. Returns `:ok` if
   the transaction was applied successfully.
   """
-  @spec apply_one_transaction!(mvcc :: t(), Transaction.t()) :: :ok
-  def apply_one_transaction!(mvcc, {version, kv_pairs}) do
+  @spec apply_one_transaction!(mvcc :: t(), BedrockTransaction.encoded()) :: :ok
+  def apply_one_transaction!(mvcc, encoded_transaction) do
+    {:ok, version} = BedrockTransaction.extract_commit_version(encoded_transaction)
+    # Extract mutations and convert to key-value pairs
+    {:ok, mutations_stream} = BedrockTransaction.stream_mutations(encoded_transaction)
+
+    kv_pairs =
+      mutations_stream
+      |> Enum.reduce(%{}, fn
+        {:set, key, value}, acc ->
+          Map.put(acc, key, value)
+
+        {:clear, key}, acc ->
+          Map.put(acc, key, nil)
+
+        {:clear_range, start_key, end_key}, acc ->
+          # Handle single-key clears (where end_key = start_key + "\0")
+          if end_key == start_key <> <<0>> do
+            Map.put(acc, start_key, nil)
+          else
+            # Skip multi-key range operations for now
+            acc
+          end
+      end)
+
     :ets.insert(
       mvcc,
       [
@@ -184,8 +209,9 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl do
           version ::
             :latest
             | Bedrock.version()
-        ) :: Transaction.t() | nil
-  @spec transaction_at_version(t(), :latest | Bedrock.version()) :: Transaction.t() | nil
+        ) :: BedrockTransaction.encoded() | nil
+  @spec transaction_at_version(t(), :latest | Bedrock.version()) ::
+          BedrockTransaction.encoded() | nil
   def transaction_at_version(mvcc, :latest) do
     newest_version(mvcc)
     |> case do
@@ -209,7 +235,17 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl do
         mvcc
       )
 
-    {version, snapshot}
+    # Convert snapshot to mutations
+    mutations =
+      Enum.map(snapshot, fn
+        {key, nil} -> {:clear_range, key, key <> <<0>>}
+        {key, value} -> {:set, key, value}
+      end)
+
+    # Create transaction and add commit version
+    encoded = BedrockTransaction.encode(%{mutations: mutations})
+    {:ok, with_version} = BedrockTransaction.add_commit_version(encoded, version)
+    with_version
   end
 
   @spec purge_keys_newer_than_version(mvcc :: t(), Bedrock.version()) :: :ok

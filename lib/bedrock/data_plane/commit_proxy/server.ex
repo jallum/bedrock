@@ -172,7 +172,9 @@ defmodule Bedrock.DataPlane.CommitProxy.Server do
   @spec handle_info(:timeout, State.t()) ::
           {:noreply, State.t()} | {:noreply, State.t(), {:continue, term()}}
   def handle_info(:timeout, %{batch: nil, mode: :running} = t) do
-    case single_transaction_batch(t, {nil, %{}}) do
+    case single_transaction_batch(t, %{
+           mutations: []
+         }) do
       {:ok, batch} ->
         t |> noreply(continue: {:finalize, batch})
 

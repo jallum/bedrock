@@ -2,16 +2,15 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Pulling do
   @moduledoc false
   alias Bedrock.ControlPlane.Config.LogDescriptor
   alias Bedrock.ControlPlane.Config.ServiceDescriptor
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.Log
-  alias Bedrock.DataPlane.Log.EncodedTransaction
-  alias Bedrock.DataPlane.Log.Transaction
   alias Bedrock.Service.Worker
 
   import Bedrock.DataPlane.Storage.Basalt.Telemetry
 
   @type puller_state :: %{
           start_after: Bedrock.version(),
-          apply_transactions_fn: ([Transaction.t()] -> Bedrock.version()),
+          apply_transactions_fn: ([BedrockTransaction.encoded()] -> Bedrock.version()),
           get_durable_version_fn: (-> Bedrock.version()),
           flush_window_fn: (-> :ok),
           logs: %{Log.id() => LogDescriptor.t()},
@@ -23,7 +22,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Pulling do
           start_after :: Bedrock.version(),
           logs :: %{Log.id() => LogDescriptor.t()},
           services :: %{Worker.id() => ServiceDescriptor.t()},
-          apply_transactions_fn :: ([Transaction.t()] -> Bedrock.version()),
+          apply_transactions_fn :: ([BedrockTransaction.encoded()] -> Bedrock.version()),
           get_durable_version_fn :: (-> Bedrock.version()),
           flush_window_fn :: (-> :ok)
         ) :: Task.t()
@@ -77,10 +76,7 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Pulling do
           {:ok, encoded_transactions} ->
             trace_log_pull_succeeded(timestamp, length(encoded_transactions))
 
-            next_version =
-              encoded_transactions
-              |> Enum.map(&EncodedTransaction.decode!/1)
-              |> apply_transactions_fn.()
+            next_version = apply_transactions_fn.(encoded_transactions)
 
             # Flush window once per pull batch
             :ok = state.flush_window_fn.()

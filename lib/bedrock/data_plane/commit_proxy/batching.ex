@@ -1,6 +1,7 @@
 defmodule Bedrock.DataPlane.CommitProxy.Batching do
   @moduledoc false
 
+  alias Bedrock.DataPlane.BedrockTransaction
   alias Bedrock.DataPlane.CommitProxy.Batch
   alias Bedrock.DataPlane.CommitProxy.State
 
@@ -55,7 +56,8 @@ defmodule Bedrock.DataPlane.CommitProxy.Batching do
 
   def start_batch_if_needed(t), do: t
 
-  @spec add_transaction_to_batch(State.t(), Bedrock.transaction(), Batch.reply_fn()) :: State.t()
+  @spec add_transaction_to_batch(State.t(), BedrockTransaction.encoded(), Batch.reply_fn()) ::
+          State.t()
   def add_transaction_to_batch(t, transaction, reply_fn),
     do: %{t | batch: t.batch |> add_transaction(transaction, reply_fn)}
 

@@ -1,6 +1,6 @@
 defmodule Bedrock.DataPlane.Log.Shale.PullingTest do
   use ExUnit.Case, async: true
-  alias Bedrock.DataPlane.Log.EncodedTransaction
+  alias Bedrock.DataPlane.BedrockTransactionTestSupport
   alias Bedrock.DataPlane.Log.Shale.{Pulling, Segment, State}
   alias Bedrock.DataPlane.Version
 
@@ -15,7 +15,9 @@ defmodule Bedrock.DataPlane.Log.Shale.PullingTest do
           {Version.from_integer(2), %{"b" => "2"}},
           {Version.from_integer(3), %{"c" => "3"}}
         ]
-        |> Enum.map(&EncodedTransaction.encode/1)
+        |> Enum.map(fn {version, writes} ->
+          BedrockTransactionTestSupport.new_log_transaction(version, writes)
+        end)
         |> Enum.reverse()
 
       segment = %Segment{
@@ -53,7 +55,9 @@ defmodule Bedrock.DataPlane.Log.Shale.PullingTest do
       {:ok, _state, transactions} = Pulling.pull(state, Version.from_integer(1))
       assert length(transactions) == 2
       expected_versions = [Version.from_integer(2), Version.from_integer(3)]
-      assert Enum.map(transactions, &EncodedTransaction.version(&1)) == expected_versions
+
+      assert Enum.map(transactions, &BedrockTransactionTestSupport.extract_log_version(&1)) ==
+               expected_versions
     end
 
     test "respects last_version parameter", %{state: state} do
@@ -61,7 +65,9 @@ defmodule Bedrock.DataPlane.Log.Shale.PullingTest do
         Pulling.pull(state, Version.from_integer(1), last_version: Version.from_integer(2))
 
       assert length(transactions) == 1
-      assert EncodedTransaction.version(hd(transactions)) == Version.from_integer(2)
+
+      assert BedrockTransactionTestSupport.extract_log_version(hd(transactions)) ==
+               Version.from_integer(2)
     end
 
     test "handles recovery mode correctly", %{state: state} do
@@ -80,8 +86,7 @@ defmodule Bedrock.DataPlane.Log.Shale.PullingTest do
         Pulling.pull(state, Version.from_integer(0), key_range: {"a", "c"})
 
       assert transactions
-             |> Enum.map(&EncodedTransaction.decode!/1)
-             |> Enum.map(&elem(&1, 1))
+             |> Enum.map(&BedrockTransactionTestSupport.extract_log_writes/1)
              |> Enum.flat_map(&Map.keys/1)
              |> Enum.sort() ==
                ["a", "b"]
@@ -92,8 +97,7 @@ defmodule Bedrock.DataPlane.Log.Shale.PullingTest do
         Pulling.pull(state, Version.from_integer(1), exclude_values: true)
 
       assert transactions
-             |> Enum.map(&EncodedTransaction.decode!/1)
-             |> Enum.map(&elem(&1, 1))
+             |> Enum.map(&BedrockTransactionTestSupport.extract_log_writes/1)
              |> Enum.map(&Map.values/1)
              |> Enum.all?(&(&1 == [<<>>]))
     end

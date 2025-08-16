@@ -1,23 +1,19 @@
 defmodule Bedrock.ControlPlane.Director.Recovery.ResolverStartupPhase do
   @moduledoc """
   Solves the critical concurrency control challenge by starting resolver components
-  that implement MVCC conflict detection through sophisticated range-to-storage-team
-  mapping and tag-based log assignment.
+  that implement MVCC conflict detection.
 
   Transforms resolver descriptors from vacancy creation into operational resolver
-  processes that understand which storage teams they coordinate with and which
-  transaction logs contain relevant historical data. Uses complex algorithms for
-  range overlap detection and tag-based filtering to ensure precise data assignment.
+  processes that are immediately ready to handle transaction conflict detection.
 
   Uses round-robin distribution across resolution-capable nodes from
   `context.node_capabilities.resolution`, ensuring fault tolerance by spreading
-  resolvers across different machines. Each resolver recovers historical conflict
-  detection state from assigned logs within the version vector range.
+  resolvers across different machines. Resolvers start directly in running mode
+  without requiring recovery coordination.
 
   Stalls if no resolution-capable nodes are available or if individual resolver
   startup fails since conflict detection is fundamental to transaction isolation
-  guarantees. Resolvers remain locked until system layout phase transitions them
-  to operational mode.
+  guarantees.
 
   See the Resolver Startup section in `docs/knowlege_base/02-deep/recovery-narrative.md`
   for detailed explanation of the concurrency control problem and mapping algorithms.
@@ -25,11 +21,8 @@ defmodule Bedrock.ControlPlane.Director.Recovery.ResolverStartupPhase do
 
   use Bedrock.ControlPlane.Director.Recovery.RecoveryPhase
 
-  alias Bedrock.ControlPlane.Config.LogDescriptor
   alias Bedrock.ControlPlane.Config.ResolverDescriptor
-  alias Bedrock.ControlPlane.Config.StorageTeamDescriptor
   alias Bedrock.ControlPlane.Director.Recovery.Shared
-  alias Bedrock.DataPlane.Log
   alias Bedrock.DataPlane.Resolver
 
   @impl true
@@ -43,18 +36,10 @@ defmodule Bedrock.ControlPlane.Director.Recovery.ResolverStartupPhase do
 
     available_resolver_nodes = Map.get(context.node_capabilities, :resolution, [])
 
-    running_logs_by_id =
-      recovery_attempt.service_pids
-      |> Map.take(recovery_attempt.logs |> Map.keys())
-
     resolver_context = %{
       resolvers: recovery_attempt.resolvers,
-      storage_teams: recovery_attempt.storage_teams,
-      logs: recovery_attempt.logs,
-      running_logs: running_logs_by_id,
       epoch: recovery_attempt.epoch,
       available_nodes: available_resolver_nodes,
-      version_vector: recovery_attempt.version_vector,
       start_supervised_fn: start_supervised_fn,
       lock_token: context.lock_token
     }
@@ -74,12 +59,8 @@ defmodule Bedrock.ControlPlane.Director.Recovery.ResolverStartupPhase do
 
   @spec define_resolvers(%{
           resolvers: [ResolverDescriptor.t()],
-          storage_teams: [StorageTeamDescriptor.t()],
-          logs: %{Log.id() => LogDescriptor.t()},
-          running_logs: %{Log.id() => pid()},
           epoch: Bedrock.epoch(),
           available_nodes: [node()],
-          version_vector: Bedrock.version_vector(),
           start_supervised_fn: (Supervisor.child_spec(), node() ->
                                   {:ok, pid()} | {:error, term()}),
           lock_token: Bedrock.lock_token()
@@ -90,17 +71,14 @@ defmodule Bedrock.ControlPlane.Director.Recovery.ResolverStartupPhase do
     resolver_boot_info =
       context.resolvers
       |> generate_resolver_ranges()
-      |> prepare_resolver_range_tags(context.storage_teams)
-      |> assign_logs_to_resolvers(context.logs, context.running_logs)
-      |> Enum.map(fn {{start_key, _end_key} = key_range, logs_to_copy} ->
-        {child_spec_for_resolver(context.epoch, key_range, context.lock_token), start_key,
-         logs_to_copy, context.lock_token}
+      |> Enum.map(fn [start_key, end_key] ->
+        key_range = {start_key, end_key}
+        {child_spec_for_resolver(context.epoch, key_range, context.lock_token), start_key}
       end)
 
     start_resolvers(
       resolver_boot_info,
       context.available_nodes,
-      context.version_vector,
       context.start_supervised_fn
     )
   end
@@ -114,90 +92,11 @@ defmodule Bedrock.ControlPlane.Director.Recovery.ResolverStartupPhase do
     |> Enum.chunk_every(2, 1, :discard)
   end
 
-  @spec prepare_resolver_range_tags([[Bedrock.key() | :end]], [StorageTeamDescriptor.t()]) :: [
-          {Bedrock.key_range(), [Bedrock.range_tag()]}
-        ]
-  defp prepare_resolver_range_tags(resolver_ranges, storage_teams) do
-    storage_team_info =
-      storage_teams
-      |> Enum.map(&tuple_from_storage_team/1)
-
-    resolver_ranges
-    |> Enum.map(fn [min, max_ex] ->
-      {{min, max_ex}, storage_team_tags_covering_range(storage_team_info, min, max_ex)}
-    end)
-  end
-
-  @spec tuple_from_storage_team(StorageTeamDescriptor.t()) ::
-          {Bedrock.key_range(), Bedrock.range_tag(), [term()]}
-  def tuple_from_storage_team(storage_team),
-    do: {storage_team.key_range, storage_team.tag, storage_team.storage_ids}
-
-  @spec storage_team_tags_covering_range(
-          [{Bedrock.key_range(), Bedrock.range_tag(), [term()]}],
-          Bedrock.key(),
-          Bedrock.key() | :end
-        ) :: [
-          Bedrock.range_tag()
-        ]
-  def storage_team_tags_covering_range(storage_teams, min_key, max_key_exclusive) do
-    :ets.match_spec_run(
-      storage_teams,
-      :ets.match_spec_compile([
-        {
-          {{:"$1", :"$2"}, :"$3", :_},
-          [
-            {:or, {:<, min_key, :"$2"}, {:==, :end, :"$2"}},
-            {:and, {:or, {:<, :"$1", max_key_exclusive}, {:==, :end, max_key_exclusive}}}
-          ],
-          [:"$3"]
-        }
-      ])
-    )
-  end
-
-  @spec assign_logs_to_resolvers(
-          resolver_range_tags :: [{Bedrock.key_range(), [Bedrock.range_tag()]}],
-          tags_by_log_id :: %{Log.id() => LogDescriptor.t()},
-          running_logs :: %{Log.id() => pid()}
-        ) ::
-          [{Bedrock.key_range(), %{Log.id() => pid()}}]
-  defp assign_logs_to_resolvers(resolver_range_tags, tags_by_log_id, running_logs) do
-    resolver_range_tags
-    |> Enum.map(fn {key_range, tags} ->
-      minimal_logs = collect_matching_logs(running_logs, tags, tags_by_log_id)
-      {key_range, minimal_logs |> Map.new()}
-    end)
-  end
-
-  @spec collect_matching_logs(%{Log.id() => pid()}, [Bedrock.range_tag()], %{
-          Log.id() => LogDescriptor.t()
-        }) ::
-          [{Log.id(), pid()}]
-  defp collect_matching_logs(running_logs, tags, tags_by_log_id) do
-    Enum.reduce(running_logs, [], fn {log_id, pid}, acc ->
-      if log_matches_tags?(log_id, pid, acc, tags, tags_by_log_id) do
-        [{log_id, pid} | acc]
-      else
-        acc
-      end
-    end)
-  end
-
-  @spec log_matches_tags?(Log.id(), pid(), [{Log.id(), pid()}], [Bedrock.range_tag()], %{
-          Log.id() => LogDescriptor.t()
-        }) :: boolean()
-  defp log_matches_tags?(log_id, _pid, acc, tags, tags_by_log_id) do
-    log_id not in acc and Enum.any?(tags, &(&1 in tags_by_log_id[log_id]))
-  end
-
   @spec start_resolvers(
           resolver_boot_info :: [
-            {Supervisor.child_spec(), start_key :: Bedrock.version(), %{Log.id() => pid()},
-             binary()}
+            {Supervisor.child_spec(), start_key :: Bedrock.key()}
           ],
           available_nodes :: [node()],
-          Bedrock.version_vector(),
           start_supervised :: (Supervisor.child_spec(), node() -> {:ok, pid()} | {:error, term()})
         ) ::
           {:ok, [{start_key :: Bedrock.key(), resolver :: pid()}]}
@@ -205,25 +104,15 @@ defmodule Bedrock.ControlPlane.Director.Recovery.ResolverStartupPhase do
   def start_resolvers(
         resolver_boot_info,
         available_nodes,
-        {first_version, last_version},
         start_supervised
       ) do
     available_nodes
     |> Stream.cycle()
     |> Enum.zip(resolver_boot_info)
     |> Task.async_stream(
-      fn {node, {child_spec, start_key, logs_to_copy, lock_token}} ->
-        with {:ok, resolver} <- start_supervised.(child_spec, node),
-             :ok <-
-               Resolver.recover_from(
-                 resolver,
-                 lock_token,
-                 logs_to_copy,
-                 first_version,
-                 last_version
-               ) do
-          {node, {start_key, resolver}}
-        else
+      fn {node, {child_spec, start_key}} ->
+        case start_supervised.(child_spec, node) do
+          {:ok, resolver} -> {node, {start_key, resolver}}
           {:error, reason} -> {node, {:error, reason}}
         end
       end,
