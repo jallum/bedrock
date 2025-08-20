@@ -17,6 +17,43 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     assert actual == int_versions_to_binary(expected_ints)
   end
 
+  # Helper function to fetch a key version using the new page-based approach
+  defp fetch_key_version(vm, key, version) do
+    case VersionManager.fetch_page_for_key(vm, key, version) do
+      {:ok, page} ->
+        Page.find_version_for_key(page, key)
+
+      error ->
+        error
+    end
+  end
+
+  # Helper function to fetch key-version pairs for a range using the new page-based approach
+  defp fetch_range_key_versions(vm, start_key, end_key, version) do
+    case VersionManager.fetch_pages_for_range(vm, start_key, end_key, version) do
+      {:ok, pages} ->
+        key_version_pairs =
+          pages
+          |> Page.stream_key_versions_in_range(start_key, end_key)
+          |> Enum.to_list()
+
+        {:ok, key_version_pairs}
+
+      error ->
+        error
+    end
+  end
+
+  # Helper function to create test transactions
+  defp test_transaction(mutations, commit_version) do
+    transaction_map = %{
+      commit_version: commit_version,
+      mutations: mutations
+    }
+
+    Transaction.encode(transaction_map)
+  end
+
   @tmp_dir "/tmp/olivine_version_manager_test"
 
   describe "basic functionality" do
@@ -344,7 +381,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       file_path = Path.join(tmp_dir, "empty.dets")
       {:ok, db} = Database.open(:empty_test, file_path)
 
-      vm = VersionManager.recover_from_database(db)
+      {:ok, vm} = VersionManager.recover_from_database(db)
 
       assert vm.max_page_id == 0
       assert vm.free_page_ids == []
@@ -378,7 +415,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       page_binary = Page.to_binary(page_0)
       :ok = Database.store_page(db, 0, page_binary)
 
-      vm_recovered = VersionManager.recover_from_database(db)
+      {:ok, vm_recovered} = VersionManager.recover_from_database(db)
 
       assert vm_recovered.max_page_id == 0
       assert vm_recovered.free_page_ids == [], "No free pages when max_page_id = 0 and only page 0 exists"
@@ -404,7 +441,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       :ok = Database.store_page(db, 2, Page.to_binary(page2))
       :ok = Database.store_page(db, 5, Page.to_binary(page5))
 
-      vm = VersionManager.recover_from_database(db)
+      {:ok, vm} = VersionManager.recover_from_database(db)
 
       assert vm.max_page_id == 5
       assert Enum.sort(vm.free_page_ids) == [1, 3, 4]
@@ -444,7 +481,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       end
 
       # Recover and verify
-      vm = VersionManager.recover_from_database(db)
+      {:ok, vm} = VersionManager.recover_from_database(db)
 
       # max_page_id should be the highest page ID that exists (100)
       assert vm.max_page_id == 100
@@ -468,12 +505,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       :ok = Database.store_page(db, 0, Page.to_binary(page0))
       :ok = Database.store_page(db, 2, <<"corrupted_page_data">>)
 
-      # Recovery should fail fast when encountering corrupted pages
-      assert_raise RuntimeError,
-                   "Database recovery failed: corrupted page detected. Database integrity is compromised.",
-                   fn ->
-                     VersionManager.recover_from_database(db)
-                   end
+      # Recovery should return error when encountering corrupted pages
+      assert {:error, :corrupted_page} = VersionManager.recover_from_database(db)
 
       Database.close(db)
     end
@@ -655,7 +688,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
       # Second session: recover and verify
       {:ok, db2} = Database.open(:roundtrip2, file_path)
-      vm2 = VersionManager.recover_from_database(db2)
+      {:ok, vm2} = VersionManager.recover_from_database(db2)
 
       # max_page_id should reflect the highest page ID that was actually created
       expected_max_page_id = if map_size(page_map) > 0, do: Enum.max(Map.keys(page_map)), else: 0
@@ -845,7 +878,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
       # Recover and verify max_page_id tracking
       {:ok, db2} = Database.open(:tracking2, file_path)
-      vm2 = VersionManager.recover_from_database(db2)
+      {:ok, vm2} = VersionManager.recover_from_database(db2)
 
       # max_page_id should reflect the highest page ID in the valid chain
       assert vm2.max_page_id == expected_max_page_id
@@ -1019,17 +1052,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       # Test version within window (between durable and current)
       # Between durable and current
       recent_version = Version.from_integer(8000)
-      assert VersionManager.fetch(vm, <<"key">>, recent_version) == {:error, :not_found}
+      assert VersionManager.fetch_page_for_key(vm, <<"key">>, recent_version) == {:error, :not_found}
 
       # Test version outside window (older than durable version)
       # Before durable version
       old_version = Version.from_integer(2000)
-      assert VersionManager.fetch(vm, <<"key">>, old_version) == {:error, :version_too_old}
+      assert VersionManager.fetch_page_for_key(vm, <<"key">>, old_version) == {:error, :version_too_old}
 
       # Test future version
       # After current version
       future_version = Version.from_integer(15_000)
-      assert VersionManager.fetch(vm, <<"key">>, future_version) == {:error, :not_found}
+      assert VersionManager.fetch_page_for_key(vm, <<"key">>, future_version) == {:error, :version_too_new}
     end
 
     test "range_fetch/4 respects window boundaries" do
@@ -1054,17 +1087,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       }
 
       # Test version within window (between durable and current)
-      assert VersionManager.range_fetch(vm, <<"a">>, <<"z">>, recent_version, nil) == {:ok, []}
+      assert VersionManager.fetch_pages_for_range(vm, <<"a">>, <<"z">>, recent_version) == {:ok, []}
 
       # Test version outside window (older than durable version)
       # Before durable version
       old_version = Version.from_integer(2000)
-      assert VersionManager.range_fetch(vm, <<"a">>, <<"z">>, old_version, nil) == {:error, :version_too_old}
+      assert VersionManager.fetch_pages_for_range(vm, <<"a">>, <<"z">>, old_version) == {:error, :version_too_old}
 
       # Test future version
       # After current version
       future_version = Version.from_integer(15_000)
-      assert VersionManager.range_fetch(vm, <<"a">>, <<"z">>, future_version, nil) == {:error, :not_found}
+      assert VersionManager.fetch_pages_for_range(vm, <<"a">>, <<"z">>, future_version) == {:error, :version_too_new}
     end
 
     test "apply_transactions/2 raises on invalid transactions" do
@@ -2368,6 +2401,500 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
       # Verify the new behavior is correct
       assert target_page_id != old_behavior_result, "New behavior should be different from old behavior"
+    end
+  end
+
+  describe "refactored fetch functions - value resolution separation" do
+    setup do
+      vm = VersionManager.new()
+      File.mkdir_p!(@tmp_dir)
+      file_path = Path.join(@tmp_dir, "fetch_test_#{System.unique_integer([:positive])}.dets")
+      {:ok, database} = Database.open(:fetch_test, file_path)
+
+      # Create a test version higher than durable version for ETS testing
+      recent_version = Version.from_integer(10_000_000)
+      durable_version_int = 5_000_000
+      durable_version = Version.from_integer(durable_version_int)
+
+      # Apply transactions to set up test data
+      transaction1 = test_transaction([{:set, "key1", "recent_value1"}], durable_version)
+      transaction2 = test_transaction([{:set, "key2", "recent_value2"}], recent_version)
+
+      vm1 = VersionManager.apply_single_transaction(transaction1, vm)
+      vm2 = VersionManager.apply_single_transaction(transaction2, vm1)
+
+      # Update durable version to make first version durable
+      vm3 = %{vm2 | durable_version: durable_version}
+
+      # Store durable values in database
+      :ok = Database.store_value(database, "key1", "durable_value1")
+
+      on_exit(fn -> Database.close(database) end)
+
+      %{
+        vm: vm3,
+        database: database,
+        recent_version: recent_version,
+        durable_version: durable_version,
+        old_version: Version.from_integer(1_000_000)
+      }
+    end
+
+    test "fetch_value/3 returns values from ETS for recent versions", %{vm: vm, recent_version: recent_version} do
+      assert VersionManager.fetch_value(vm, "key2", recent_version) == {:ok, "recent_value2"}
+    end
+
+    test "fetch_value/3 returns :check_database for durable versions", %{vm: vm, durable_version: durable_version} do
+      assert VersionManager.fetch_value(vm, "key1", durable_version) == {:error, :check_database}
+    end
+
+    test "fetch_value/3 returns :not_found when value missing from ETS", %{vm: vm, recent_version: recent_version} do
+      assert VersionManager.fetch_value(vm, "nonexistent_key", recent_version) == {:error, :not_found}
+    end
+
+    test "fetch_value/3 returns :check_database for versions equal to durable", %{
+      vm: vm,
+      durable_version: durable_version
+    } do
+      assert VersionManager.fetch_value(vm, "key1", durable_version) == {:error, :check_database}
+    end
+
+    test "fetch_value/3 returns :check_database for versions below durable", %{vm: vm, old_version: old_version} do
+      assert VersionManager.fetch_value(vm, "key1", old_version) == {:error, :check_database}
+    end
+
+    test "fetch/4 returns versions instead of values for recent keys", %{vm: vm, recent_version: recent_version} do
+      case VersionManager.fetch_page_for_key(vm, "key2", recent_version) do
+        {:ok, page} ->
+          case Page.find_version_for_key(page, "key2") do
+            {:ok, found_version} ->
+              assert found_version == recent_version
+
+            error ->
+              flunk("Expected {:ok, version}, got: #{inspect(error)}")
+          end
+
+        error ->
+          flunk("Expected {:ok, page}, got: #{inspect(error)}")
+      end
+    end
+
+    test "fetch_page_for_key/3 returns pages for durable keys", %{vm: vm, durable_version: durable_version} do
+      case VersionManager.fetch_page_for_key(vm, "key1", durable_version) do
+        {:ok, page} ->
+          case Page.find_version_for_key(page, "key1") do
+            {:ok, found_version} ->
+              assert found_version == durable_version
+
+            error ->
+              flunk("Expected {:ok, version}, got: #{inspect(error)}")
+          end
+
+        error ->
+          flunk("Expected {:ok, page}, got: #{inspect(error)}")
+      end
+    end
+
+    test "fetch/4 returns :not_found for nonexistent keys", %{vm: vm, recent_version: recent_version} do
+      assert VersionManager.fetch_page_for_key(vm, "nonexistent_key", recent_version) == {:error, :not_found}
+    end
+
+    test "fetch/4 returns :version_too_old for versions before durable", %{vm: vm, old_version: old_version} do
+      assert VersionManager.fetch_page_for_key(vm, "key1", old_version) == {:error, :version_too_old}
+    end
+
+    test "fetch/4 returns :version_too_new for future versions", %{vm: vm} do
+      future_version = Version.from_integer(20_000_000)
+      assert VersionManager.fetch_page_for_key(vm, "key1", future_version) == {:error, :version_too_new}
+    end
+
+    test "range_fetch/5 returns key-version pairs instead of key-value pairs", %{
+      vm: vm,
+      recent_version: recent_version,
+      durable_version: durable_version
+    } do
+      case fetch_range_key_versions(vm, "key1", "key3", recent_version) do
+        {:ok, results} ->
+          # Should contain both keys with their versions
+          assert length(results) >= 2
+
+          # Check that we get key-version pairs
+          Enum.each(results, fn {key, version} ->
+            assert is_binary(key)
+            assert is_binary(version)
+            assert byte_size(version) == 8
+          end)
+
+          # Check specific key-version pairs
+          assert {"key1", durable_version} in results
+          assert {"key2", recent_version} in results
+
+        error ->
+          flunk("Expected {:ok, results}, got: #{inspect(error)}")
+      end
+    end
+
+    test "range_fetch/5 returns empty list for range with no keys", %{vm: vm, recent_version: recent_version} do
+      assert VersionManager.fetch_pages_for_range(vm, "nonexistent1", "nonexistent2", recent_version) == {:ok, []}
+    end
+
+    test "range_fetch/5 returns :version_too_old for versions before durable", %{vm: vm, old_version: old_version} do
+      assert VersionManager.fetch_pages_for_range(vm, "key1", "key3", old_version) == {:error, :version_too_old}
+    end
+
+    test "range_fetch/5 returns :version_too_new for future versions", %{vm: vm} do
+      future_version = Version.from_integer(20_000_000)
+      assert VersionManager.fetch_pages_for_range(vm, "key1", "key3", future_version) == {:error, :version_too_new}
+    end
+  end
+
+  describe "Page.lookup_key_version/4 tests" do
+    test "lookup_key_version/4 returns version for existing key" do
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(2000)
+
+      page = Page.new(1, ["key1", "key2"], [version1, version2])
+      page_map = %{1 => page}
+
+      assert Page.lookup_key_version(nil, 1, "key1", page_map) == {:ok, version1}
+      assert Page.lookup_key_version(nil, 1, "key2", page_map) == {:ok, version2}
+    end
+
+    test "lookup_key_version/4 returns :not_found for nonexistent key" do
+      version1 = Version.from_integer(1000)
+      page = Page.new(1, ["key1"], [version1])
+      page_map = %{1 => page}
+
+      assert Page.lookup_key_version(nil, 1, "nonexistent", page_map) == {:error, :not_found}
+    end
+
+    test "lookup_key_version/4 works with empty page" do
+      page = Page.new(1, [], [])
+      page_map = %{1 => page}
+
+      assert Page.lookup_key_version(nil, 1, "any_key", page_map) == {:error, :not_found}
+    end
+
+    test "lookup_key_version/4 handles multiple pages correctly" do
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(2000)
+      version3 = Version.from_integer(3000)
+
+      page1 = Page.new(1, ["key1"], [version1])
+      page2 = Page.new(2, ["key2", "key3"], [version2, version3])
+      page_map = %{1 => page1, 2 => page2}
+
+      assert Page.lookup_key_version(nil, 1, "key1", page_map) == {:ok, version1}
+      assert Page.lookup_key_version(nil, 2, "key2", page_map) == {:ok, version2}
+      assert Page.lookup_key_version(nil, 2, "key3", page_map) == {:ok, version3}
+      assert Page.lookup_key_version(nil, 1, "key2", page_map) == {:error, :not_found}
+    end
+  end
+
+  describe "Page.stream_key_versions_in_range/3 tests" do
+    test "stream_key_versions_in_range/3 returns key-version pairs in range" do
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(2000)
+      version3 = Version.from_integer(3000)
+      version4 = Version.from_integer(4000)
+
+      page1 = Page.new(1, ["key1", "key3"], [version1, version3])
+      page2 = Page.new(2, ["key5", "key7"], [version2, version4])
+
+      pages_stream = [page1, page2]
+
+      results =
+        pages_stream
+        |> Page.stream_key_versions_in_range("key2", "key6")
+        |> Enum.to_list()
+
+      expected = [{"key3", version3}, {"key5", version2}]
+      assert results == expected
+    end
+
+    test "stream_key_versions_in_range/3 returns empty list when no keys in range" do
+      version1 = Version.from_integer(1000)
+      page = Page.new(1, ["key1", "key9"], [version1, version1])
+
+      pages_stream = [page]
+
+      results =
+        pages_stream
+        |> Page.stream_key_versions_in_range("key3", "key7")
+        |> Enum.to_list()
+
+      assert results == []
+    end
+
+    test "stream_key_versions_in_range/3 handles inclusive start, exclusive end" do
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(2000)
+      version3 = Version.from_integer(3000)
+
+      page = Page.new(1, ["key2", "key3", "key5"], [version1, version2, version3])
+      pages_stream = [page]
+
+      # Range ["key2", "key5") should include key2 and key3, but not key5
+      results =
+        pages_stream
+        |> Page.stream_key_versions_in_range("key2", "key5")
+        |> Enum.to_list()
+
+      expected = [{"key2", version1}, {"key3", version2}]
+      assert results == expected
+    end
+
+    test "stream_key_versions_in_range/3 handles multiple pages with overlapping ranges" do
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(2000)
+      version3 = Version.from_integer(3000)
+      version4 = Version.from_integer(4000)
+
+      page1 = Page.new(1, ["key1", "key3"], [version1, version3])
+      page2 = Page.new(2, ["key2", "key4"], [version2, version4])
+
+      pages_stream = [page1, page2]
+
+      results =
+        pages_stream
+        |> Page.stream_key_versions_in_range("key1", "key4")
+        |> Enum.to_list()
+
+      # Should include key1, key3 from page1 and key2 from page2 (but not key4 - exclusive end)
+      expected = [{"key1", version1}, {"key3", version3}, {"key2", version2}]
+      assert results == expected
+    end
+
+    test "stream_key_versions_in_range/3 works with empty pages stream" do
+      results =
+        []
+        |> Page.stream_key_versions_in_range("key1", "key5")
+        |> Enum.to_list()
+
+      assert results == []
+    end
+  end
+
+  describe "integration tests - fetch flow" do
+    setup do
+      vm = VersionManager.new()
+      file_path = "/tmp/test_db_olivine/integration_test_#{System.unique_integer([:positive])}.dets"
+      {:ok, database} = Database.open(:integration_test, file_path)
+
+      # Create versions: one durable (in database) and one recent (in ETS)
+      durable_version = Version.from_integer(1_000_000)
+      recent_version = Version.from_integer(10_000_000)
+
+      # Apply transactions
+      transaction1 = test_transaction([{:set, "durable_key", "durable_value"}], durable_version)
+      transaction2 = test_transaction([{:set, "recent_key", "recent_value"}], recent_version)
+
+      vm1 = VersionManager.apply_single_transaction(transaction1, vm)
+      vm2 = VersionManager.apply_single_transaction(transaction2, vm1)
+
+      # Make first version durable
+      vm3 = %{vm2 | durable_version: durable_version}
+
+      # Store durable value in database
+      :ok = Database.store_value(database, "durable_key", "durable_value")
+
+      on_exit(fn -> Database.close(database) end)
+
+      %{
+        vm: vm3,
+        database: database,
+        durable_version: durable_version,
+        recent_version: recent_version
+      }
+    end
+
+    test "complete flow: fetch version -> fetch_value from ETS", %{vm: vm, recent_version: recent_version} do
+      # Step 1: fetch returns version
+      {:ok, found_version} = fetch_key_version(vm, "recent_key", recent_version)
+      assert found_version == recent_version
+
+      # Step 2: fetch_value returns value from ETS
+      {:ok, value} = VersionManager.fetch_value(vm, "recent_key", found_version)
+      assert value == "recent_value"
+    end
+
+    test "complete flow: fetch version -> fetch_value -> database fallback", %{
+      vm: vm,
+      database: database,
+      durable_version: durable_version
+    } do
+      # Step 1: fetch returns version
+      {:ok, found_version} = fetch_key_version(vm, "durable_key", durable_version)
+      assert found_version == durable_version
+
+      # Step 2: fetch_value indicates database check needed
+      {:error, :check_database} = VersionManager.fetch_value(vm, "durable_key", found_version)
+
+      # Step 3: fallback to database
+      {:ok, value} = Database.load_value(database, "durable_key")
+      assert value == "durable_value"
+    end
+
+    test "complete flow: fetch fails -> no value resolution needed", %{vm: vm, recent_version: recent_version} do
+      # Step 1: fetch fails for nonexistent key
+      {:error, :not_found} = fetch_key_version(vm, "nonexistent", recent_version)
+
+      # No need for step 2 - fetch_value is never called
+      # This tests that the separation properly handles error propagation
+    end
+
+    test "range fetch flow: get key-versions -> resolve values separately", %{
+      vm: vm,
+      database: database,
+      recent_version: recent_version
+    } do
+      # Step 1: Test individual key fetch and value resolution workflow
+      {:ok, durable_version_found} = fetch_key_version(vm, "durable_key", recent_version)
+      {:ok, recent_version_found} = fetch_key_version(vm, "recent_key", recent_version)
+
+      # Step 2: Test fetch_value for each type
+      # Recent key should be in ETS
+      {:ok, recent_value} = VersionManager.fetch_value(vm, "recent_key", recent_version_found)
+      assert recent_value == "recent_value"
+
+      # Durable key should require database lookup
+      {:error, :check_database} = VersionManager.fetch_value(vm, "durable_key", durable_version_found)
+      {:ok, durable_value} = Database.load_value(database, "durable_key")
+      assert durable_value == "durable_value"
+
+      # Step 3: Test that range_fetch returns key-version pairs (even if empty for now)
+      # This tests the interface rather than the specific implementation
+      {:ok, key_versions} = fetch_range_key_versions(vm, "a", "zzzz", recent_version)
+      # The important thing is that it returns the right format
+      assert is_list(key_versions)
+
+      # Each result should be a {key, version} tuple if any exist
+      Enum.each(key_versions, fn {key, version} ->
+        assert is_binary(key)
+        assert is_binary(version)
+        assert byte_size(version) == 8
+      end)
+    end
+  end
+
+  describe "edge cases and error scenarios" do
+    setup do
+      vm = VersionManager.new()
+      file_path = "/tmp/test_db_olivine/edge_test_#{System.unique_integer([:positive])}.dets"
+      {:ok, database} = Database.open(:edge_test, file_path)
+
+      # Create test scenario with mixed storage locations
+      durable_version = Version.from_integer(1_000_000)
+      recent_version = Version.from_integer(10_000_000)
+
+      transaction1 = test_transaction([{:set, "key_db_only", "value1"}], durable_version)
+      transaction2 = test_transaction([{:set, "key_both", "value2"}], recent_version)
+
+      vm1 = VersionManager.apply_single_transaction(transaction1, vm)
+      vm2 = VersionManager.apply_single_transaction(transaction2, vm1)
+      vm3 = %{vm2 | durable_version: durable_version}
+
+      # Store only one key in database
+      :ok = Database.store_value(database, "key_db_only", "db_value1")
+
+      on_exit(fn -> Database.close(database) end)
+
+      %{
+        vm: vm3,
+        database: database,
+        durable_version: durable_version,
+        recent_version: recent_version
+      }
+    end
+
+    test "version exists in page but value missing from ETS", %{vm: vm, recent_version: recent_version} do
+      # Manually clear ETS entry for recent key to simulate missing value
+      :ets.delete(vm.lookaside_buffer, {recent_version, "key_both"})
+
+      # fetch should still find the version
+      {:ok, found_version} = fetch_key_version(vm, "key_both", recent_version)
+      assert found_version == recent_version
+
+      # but fetch_value should return :not_found
+      assert VersionManager.fetch_value(vm, "key_both", found_version) == {:error, :not_found}
+    end
+
+    test "version exists but value missing from database", %{
+      vm: vm,
+      database: database,
+      durable_version: durable_version
+    } do
+      # Create a key that exists in pages but not in database
+      transaction = test_transaction([{:set, "missing_key", "some_value"}], durable_version)
+      vm_with_missing = VersionManager.apply_single_transaction(transaction, vm)
+
+      # fetch finds the version
+      {:ok, found_version} = fetch_key_version(vm_with_missing, "missing_key", durable_version)
+      assert found_version == durable_version
+
+      # fetch_value indicates database check needed
+      assert VersionManager.fetch_value(vm_with_missing, "missing_key", found_version) == {:error, :check_database}
+
+      # Database fallback should fail for this key (not stored in database)
+      assert Database.load_value(database, "missing_key") == {:error, :not_found}
+    end
+
+    test "concurrent access - ETS entry appears between fetch and fetch_value", %{
+      vm: vm,
+      recent_version: recent_version
+    } do
+      # Simulate race condition by clearing and re-adding ETS entry
+      :ets.delete(vm.lookaside_buffer, {recent_version, "key_both"})
+
+      # fetch should still work (finds version in pages)
+      {:ok, found_version} = fetch_key_version(vm, "key_both", recent_version)
+
+      # Re-add ETS entry (simulating concurrent write)
+      :ets.insert(vm.lookaside_buffer, {{recent_version, "key_both"}, "concurrent_value"})
+
+      # fetch_value should now succeed
+      assert VersionManager.fetch_value(vm, "key_both", found_version) == {:ok, "concurrent_value"}
+    end
+
+    test "mixed storage key resolution workflow", %{vm: vm, database: database, recent_version: recent_version} do
+      # This test demonstrates the fetch -> fetch_value -> database fallback workflow
+      # It reuses existing keys from the setup to avoid MVCC complexity
+
+      # The setup already created:
+      # - "key_db_only" with durable_version (should be in database)
+      # - "key_both" with recent_version (should be in ETS)
+
+      # Test 1: ETS key resolution
+      {:ok, recent_version_found} = fetch_key_version(vm, "key_both", recent_version)
+      {:ok, "value2"} = VersionManager.fetch_value(vm, "key_both", recent_version_found)
+
+      # Test 2: Database key resolution
+      {:ok, durable_version_found} = fetch_key_version(vm, "key_db_only", recent_version)
+      {:error, :check_database} = VersionManager.fetch_value(vm, "key_db_only", durable_version_found)
+      {:ok, "db_value1"} = Database.load_value(database, "key_db_only")
+
+      # Test 3: Nonexistent key
+      {:error, :not_found} = fetch_key_version(vm, "nonexistent", recent_version)
+
+      # This demonstrates that the refactored fetch functions properly separate
+      # version finding from value resolution, enabling efficient caching strategies
+    end
+
+    test "error propagation maintains transaction semantics", %{vm: vm} do
+      # Test that errors are properly propagated without side effects
+      future_version = Version.from_integer(20_000_000)
+
+      # fetch fails cleanly
+      assert fetch_key_version(vm, "any_key", future_version) == {:error, :version_too_new}
+
+      # fetch_value should not be called, but if called with invalid version should handle gracefully
+      assert VersionManager.fetch_value(vm, "any_key", future_version) == {:error, :not_found}
+
+      # range_fetch fails cleanly
+      assert fetch_range_key_versions(vm, "a", "z", future_version) == {:error, :version_too_new}
+
+      # System state should be unchanged
+      assert vm.current_version != future_version
     end
   end
 end

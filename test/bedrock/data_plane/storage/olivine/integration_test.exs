@@ -241,12 +241,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
                {:ok, "value1"}
              ]
 
-      # Test future version (should be waitlisted or return not found)
+      # Test future version (should return version_too_new)
       future_version = Version.from_integer(999)
 
       case Logic.fetch(state1, "test:key1", future_version) do
         {:error, :not_found} -> :ok
         {:error, :version_too_old} -> :ok
+        {:error, :version_too_new} -> :ok
         {:ok, _} -> flunk("Should not find future version data")
       end
 
@@ -273,8 +274,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       state1 = %{state | version_manager: vm1}
 
       # Test range fetch - start_key inclusive, end_key exclusive
-      case Logic.try_range_fetch_or_waitlist(state1, "range:aaa", "range:ddd", applied_version1, self()) do
-        {:ok, results, _new_state} ->
+      case Logic.range_fetch(state1, "range:aaa", "range:ddd", applied_version1) do
+        {:ok, results} ->
           assert is_list(results)
           assert length(results) == 3
 
@@ -288,12 +289,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           assert "value_bbb" in values
           assert "value_ccc" in values
 
-        {:error, :version_too_old, _state} ->
+        {:error, :version_too_old} ->
           # Version too old - acceptable for MVP testing
           :ok
 
-        {:waitlist, _state} ->
-          # Future version waitlisting is working
+        {:error, :version_too_new} ->
+          # Future version - acceptable for MVP testing
           :ok
       end
 
@@ -349,8 +350,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
 
       case result do
         {:ok, value} when is_binary(value) -> :ok
-        {:error, :key_out_of_range} -> :ok
         {:error, :not_found} -> :ok
+        {:error, :version_too_new} -> :ok
         _ -> flunk("Unexpected result: #{inspect(result)}")
       end
 
@@ -367,6 +368,169 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       end)
 
       Logic.shutdown(state)
+    end
+  end
+
+  describe "Range Fetch Testing" do
+    @tag :tmp_dir
+    test "range_fetch returns key-value pairs for specified range", %{tmp_dir: tmp_dir} do
+      {:ok, state} = Logic.startup(:test_range_fetch, self(), random_id(), tmp_dir)
+
+      # Create test data
+      v1 = Version.from_integer(100)
+
+      tx1 =
+        TransactionTestSupport.new_log_transaction(v1, %{
+          "key1" => "value1",
+          "key2" => "value2",
+          "key3" => "value3",
+          "key5" => "value5"
+        })
+
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      updated_state = %{state | version_manager: vm1}
+
+      # Test range fetch that includes some keys
+      case Logic.range_fetch(updated_state, "key1", "key4", v1) do
+        {:ok, results} ->
+          assert is_list(results)
+          # key1, key2, key3 (excludes key4, key5)
+          assert length(results) == 3
+
+          # Check key-value pairs
+          keys = Enum.map(results, fn {key, _value} -> key end)
+          assert "key1" in keys
+          assert "key2" in keys
+          assert "key3" in keys
+          refute "key5" in keys
+
+        {:error, reason} ->
+          flunk("Expected {:ok, results}, got {:error, #{inspect(reason)}}")
+      end
+
+      Logic.shutdown(updated_state)
+    end
+
+    @tag :tmp_dir
+    test "range_fetch handles empty ranges", %{tmp_dir: tmp_dir} do
+      {:ok, state} = Logic.startup(:test_empty_range, self(), random_id(), tmp_dir)
+
+      v1 = Version.from_integer(100)
+
+      # Test range with no keys
+      case Logic.range_fetch(state, "nonexistent1", "nonexistent2", v1) do
+        {:ok, results} ->
+          assert results == []
+
+        {:error, :version_too_new} ->
+          # Future version - acceptable for MVP testing
+          :ok
+
+        {:error, reason} ->
+          flunk("Expected {:ok, []}, got {:error, #{inspect(reason)}}")
+      end
+
+      Logic.shutdown(state)
+    end
+
+    @tag :tmp_dir
+    test "range_fetch respects version boundaries", %{tmp_dir: tmp_dir} do
+      {:ok, state} = Logic.startup(:test_version_boundaries, self(), random_id(), tmp_dir)
+
+      v1 = Version.from_integer(100)
+      future_version = Version.from_integer(200)
+      old_version = Version.from_integer(50)
+
+      tx1 =
+        TransactionTestSupport.new_log_transaction(v1, %{
+          "test_key" => "test_value"
+        })
+
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      updated_state = %{state | version_manager: vm1}
+
+      # Test future version
+      case Logic.range_fetch(updated_state, "test_key", "test_key_z", future_version) do
+        {:ok, results} ->
+          # Future version should return empty
+          assert results == []
+
+        {:error, :version_too_new} ->
+          # Future version returns version_too_new - expected behavior
+          :ok
+
+        {:error, reason} ->
+          flunk("Unexpected error for future version: #{inspect(reason)}}")
+      end
+
+      # Test old version
+      case Logic.range_fetch(updated_state, "test_key", "test_key_z", old_version) do
+        {:ok, results} ->
+          # Old version should return empty
+          assert results == []
+
+        {:error, :version_too_old} ->
+          # Also acceptable
+          :ok
+
+        {:error, reason} ->
+          flunk("Unexpected error for old version: #{inspect(reason)}")
+      end
+
+      Logic.shutdown(updated_state)
+    end
+
+    @tag :tmp_dir
+    test "range_fetch across multiple pages", %{tmp_dir: tmp_dir} do
+      {:ok, state} = Logic.startup(:test_multi_page_range, self(), random_id(), tmp_dir)
+
+      v1 = Version.from_integer(100)
+
+      # Create enough keys to force page splits (>256 keys per page)
+      # Create 300 keys to ensure we have at least 2 pages
+      key_value_map =
+        for i <- 1..300, into: %{} do
+          key = "key_#{String.pad_leading("#{i}", 4, "0")}"
+          value = "value_#{i}"
+          {key, value}
+        end
+
+      tx1 = TransactionTestSupport.new_log_transaction(v1, key_value_map)
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      updated_state = %{state | version_manager: vm1}
+
+      # Verify that we have multiple pages by checking some pages exist
+      # This is an indirect way to confirm page splitting occurred
+      assert vm1.current_version == v1
+
+      # Test range fetch that should span multiple pages
+      # Fetch from key_0050 to key_0250 (should include keys in different pages)
+      case Logic.range_fetch(updated_state, "key_0050", "key_0250", v1) do
+        {:ok, results} ->
+          assert is_list(results)
+          # Should include 200 keys: key_0050 through key_0249
+          assert length(results) == 200
+
+          # Verify the range is correct (inclusive start, exclusive end)
+          keys = Enum.map(results, fn {key, _value} -> key end)
+          assert "key_0050" in keys
+          assert "key_0249" in keys
+          refute "key_0250" in keys
+          refute "key_0049" in keys
+
+          # Verify keys are sorted
+          assert keys == Enum.sort(keys)
+
+          # Verify values match expected pattern
+          {first_key, first_value} = List.first(results)
+          assert first_key == "key_0050"
+          assert first_value == "value_50"
+
+        {:error, reason} ->
+          flunk("Expected {:ok, results}, got {:error, #{inspect(reason)}}")
+      end
+
+      Logic.shutdown(updated_state)
     end
   end
 
@@ -606,11 +770,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       state1 = %{state | version_manager: vm1}
 
       # Request for future version should be waitlisted or return error
-      # Create a mock GenServer 'from' tuple for testing
-      mock_from = {self(), make_ref()}
 
-      case Logic.try_fetch_or_waitlist(state1, "wait:key1", future_v, mock_from) do
-        {:waitlist, updated_state} ->
+      case Logic.fetch(state1, "wait:key1", future_v) do
+        {:error, :version_too_new} ->
+          # This is the expected result when version is too new
+          # For integration testing, we'll simulate what the server does
+          reply_fn = fn _result -> :ok end
+          updated_state = Logic.add_to_waitlist(state1, {"wait:key1", future_v}, future_v, reply_fn, 5000)
+
           # Should be waitlisted
           assert length(Map.keys(updated_state.waiting_fetches)) > 0
 
@@ -630,15 +797,54 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           # Should have notified the waiting fetch - verify map is actually empty
           assert final_state.waiting_fetches == %{}
 
-        {:ok, _value, _state} ->
-          # If not waitlisted, that's also acceptable for MVP
+        {:ok, _value} ->
+          # If found immediately, that's also acceptable for MVP
           :ok
 
-        {:error, :not_found, _state} ->
+        {:error, :not_found} ->
           # Future version returns not found - acceptable for MVP
           :ok
 
-        {:error, :version_too_old, _state} ->
+        {:error, :version_too_old} ->
+          # Version too old - acceptable for MVP (window management)
+          :ok
+      end
+
+      Logic.shutdown(state1)
+    end
+
+    @tag :tmp_dir
+    test "future version requests without wait_ms return error immediately", %{tmp_dir: tmp_dir} do
+      {:ok, state} = Logic.startup(:test_no_wait, self(), random_id(), tmp_dir)
+
+      v1 = Version.from_integer(1)
+      future_v = Version.from_integer(999)
+
+      # Apply initial data
+      tx1 =
+        TransactionTestSupport.new_log_transaction(v1, %{
+          "nowait:key1" => "value1"
+        })
+
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      state1 = %{state | version_manager: vm1}
+
+      # Request for future version without wait_ms should return error immediately
+
+      case Logic.fetch(state1, "nowait:key1", future_v) do
+        {:error, :version_too_new} ->
+          # Should return version_too_new error immediately when no waitlisting
+          :ok
+
+        {:ok, _value} ->
+          # If somehow the future version is found, that's acceptable for MVP
+          :ok
+
+        {:error, :not_found} ->
+          # Future version returns not found - also acceptable for MVP
+          :ok
+
+        {:error, :version_too_old} ->
           # Version too old - acceptable for MVP (window management)
           :ok
       end

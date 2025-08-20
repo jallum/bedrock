@@ -13,17 +13,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   alias Bedrock.DataPlane.Version
 
   @type id :: non_neg_integer()
-  @type page :: %{
+  @type t :: %{
           id: id(),
           next_id: id(),
           keys: [binary()],
           versions: [Bedrock.version()]
         }
 
-  @spec new(id :: id(), keys :: [binary()]) :: page()
+  @spec new(id :: id(), keys :: [binary()]) :: t()
   def new(id, keys), do: new(id, keys, Enum.map(keys, fn _ -> Version.zero() end))
 
-  @spec new(id :: id(), keys :: [binary()], versions :: [Bedrock.version()]) :: page()
+  @spec new(id :: id(), keys :: [binary()], versions :: [Bedrock.version()]) :: t()
   def new(id, keys, versions) when length(keys) == length(versions) do
     if !Enum.all?(versions, &(is_binary(&1) and byte_size(&1) == 8)) do
       raise ArgumentError, "All versions must be 8-byte binary values"
@@ -37,7 +37,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     }
   end
 
-  @spec to_binary(page()) :: binary()
+  @spec to_binary(t()) :: binary()
   def to_binary(page) do
     key_count = length(page.keys)
     encoded_keys = encode_keys(page.keys)
@@ -59,7 +59,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   @spec encode_keys(keys :: [binary()]) :: binary()
   defp encode_keys(keys), do: for(key <- keys, into: <<>>, do: <<byte_size(key)::unsigned-big-16, key::binary>>)
 
-  @spec from_binary(binary()) :: {:ok, page()} | {:error, :invalid_page}
+  @spec from_binary(binary()) :: {:ok, t()} | {:error, :invalid_page}
   def from_binary(binary) do
     with <<id::unsigned-big-64, next_id::unsigned-big-64, key_count::unsigned-big-32, _last_key_offset::unsigned-big-32,
            _reserved::unsigned-big-64, encoded_versions::binary-size(key_count * 8), encoded_keys::binary>> <- binary,
@@ -94,21 +94,35 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   defp decode_versions(<<>>, acc), do: {:ok, Enum.reverse(acc)}
   defp decode_versions(_, _acc), do: {:error, :invalid_versions}
 
-  @spec key_count(page :: page()) :: non_neg_integer()
+  @spec key_count(page :: t()) :: non_neg_integer()
   def key_count(page), do: length(page.keys)
 
-  @spec keys(page :: page()) :: [binary()]
+  @spec keys(page :: t()) :: [binary()]
   def keys(page), do: page.keys
 
-  @spec lookup_key_in_page(page :: page(), key :: binary()) :: {:ok, Bedrock.version()} | {:error, :not_found}
-  def lookup_key_in_page(page, key) do
+  @spec find_version_for_key(t(), Bedrock.key()) :: {:ok, Bedrock.version()} | {:error, :not_found}
+  def find_version_for_key(page, key) do
     case Enum.find_index(page.keys, &(&1 == key)) do
       nil -> {:error, :not_found}
       index -> {:ok, Enum.at(page.versions, index)}
     end
   end
 
-  @spec add_key_to_page(page :: page(), key :: binary(), version :: Bedrock.version()) :: page()
+  # Alias for backward compatibility with tests
+  @spec lookup_key_in_page(t(), Bedrock.key()) :: {:ok, Bedrock.version()} | {:error, :not_found}
+  def lookup_key_in_page(page, key), do: find_version_for_key(page, key)
+
+  # Function for looking up key version using page map (used in tests)
+  @spec lookup_key_version(any(), id(), Bedrock.key(), map()) ::
+          {:ok, Bedrock.version()} | {:error, :not_found}
+  def lookup_key_version(_version_manager, page_id, key, page_map) do
+    case Map.fetch(page_map, page_id) do
+      {:ok, page} -> find_version_for_key(page, key)
+      :error -> {:error, :not_found}
+    end
+  end
+
+  @spec add_key_to_page(page :: t(), key :: binary(), version :: Bedrock.version()) :: t()
   def add_key_to_page(page, key, version) when is_binary(version) and byte_size(version) == 8 do
     case find_insertion_point(page.keys, key) do
       {index, :duplicate} ->
@@ -128,8 +142,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   defp find_insertion_point([h | _], key, index) when key == h, do: {index, :duplicate}
   defp find_insertion_point([_ | t], key, index), do: find_insertion_point(t, key, index + 1)
 
-  @spec split_page_simple(page :: page(), version_manager :: any()) ::
-          {{page(), page()}, any()} | {:error, :no_split_needed}
+  @spec split_page_simple(page :: t(), version_manager :: any()) ::
+          {{t(), t()}, any()} | {:error, :no_split_needed}
   def split_page_simple(page, version_manager) when length(page.keys) > 256 do
     keys = page.keys
     versions = page.versions
@@ -194,9 +208,21 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     end
   end
 
-  @spec stream_keys_in_range(Enumerable.t(page()), Bedrock.key(), Bedrock.key()) ::
+  @spec stream_keys_in_range(Enumerable.t(t()), Bedrock.key(), Bedrock.key()) ::
           Enumerable.t({Bedrock.key(), Bedrock.version()})
   def stream_keys_in_range(pages_stream, start_key, end_key) do
+    pages_stream
+    |> Stream.flat_map(fn page ->
+      Enum.zip(page.keys, page.versions)
+    end)
+    |> Stream.drop_while(fn {key, _version} -> key < start_key end)
+    |> Stream.take_while(fn {key, _version} -> key < end_key end)
+  end
+
+  @spec stream_key_versions_in_range(Enumerable.t(t()), Bedrock.key(), Bedrock.key()) ::
+          Enumerable.t({Bedrock.key(), Bedrock.version()})
+  def stream_key_versions_in_range(pages_stream, start_key, end_key) do
+    # Returns {key, version} tuples without value resolution
     pages_stream
     |> Stream.flat_map(fn page ->
       Enum.zip(page.keys, page.versions)
@@ -210,7 +236,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   def load_and_search_page_simple_with_loader(_version_manager, id, key, page_map, load_value_fn) do
     page = Map.fetch!(page_map, id)
 
-    case lookup_key_in_page(page, key) do
+    case find_version_for_key(page, key) do
       {:ok, found_version} ->
         load_value_fn.(key, found_version)
 
@@ -244,7 +270,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   end
 
   defp load_key_value_pair(page, key, load_value_fn) do
-    case lookup_key_in_page(page, key) do
+    case find_version_for_key(page, key) do
       {:ok, found_version} ->
         load_value_with_version(key, found_version, load_value_fn)
 
@@ -260,14 +286,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     end
   end
 
-  @spec persist_page_to_database(any(), Database.t(), page :: page()) ::
+  @spec persist_page_to_database(any(), Database.t(), page :: t()) ::
           :ok | {:error, term()}
   def persist_page_to_database(_version_manager, database, page) do
     binary = to_binary(page)
     Database.store_page(database, page.id, binary)
   end
 
-  @spec persist_pages_batch([page()], Database.t()) :: :ok | {:error, term()}
+  @spec persist_pages_batch([t()], Database.t()) :: :ok | {:error, term()}
   def persist_pages_batch(pages, database) do
     Enum.reduce_while(pages, :ok, fn page, :ok ->
       binary = to_binary(page)

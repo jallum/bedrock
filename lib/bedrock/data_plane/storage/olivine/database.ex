@@ -86,6 +86,23 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
     end
   end
 
+  @doc """
+  Returns a value loader function that captures only the minimal data needed
+  for async value resolution tasks. Avoids copying the entire Database struct.
+  """
+  @spec value_loader(t()) :: (Bedrock.key() -> {:ok, Bedrock.value()} | {:error, :not_found})
+  def value_loader(database) do
+    # Capture only the DETS reference
+    dets_storage = database.dets_storage
+
+    fn key ->
+      case :dets.lookup(dets_storage, key) do
+        [{^key, value}] -> {:ok, value}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
   @spec get_all_page_ids(database :: t()) :: [page_id()]
   def get_all_page_ids(database) do
     :dets.foldl(

@@ -40,7 +40,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   alias Bedrock.DataPlane.Version
 
   @type page_id :: Page.id()
-  @type page :: Page.page()
+  @type page :: Page.t()
 
   @type loader_fn :: (Bedrock.key(), Bedrock.version() -> {:ok, Bedrock.value()} | {:error, :not_found})
   @type version_data :: {
@@ -71,7 +71,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
   @spec new() :: t()
   def new do
-    lookaside_buffer = :ets.new(:olivine_lookaside, [:ordered_set, :private])
+    lookaside_buffer = :ets.new(:olivine_lookaside, [:ordered_set, :protected, {:read_concurrency, true}])
 
     initial_page = Page.new(0, [], [])
     initial_tree = :gb_trees.empty()
@@ -88,9 +88,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     }
   end
 
-  @spec recover_from_database(database :: Database.t()) :: t()
+  @spec recover_from_database(database :: Database.t()) ::
+          {:ok, t()} | {:error, :corrupted_page | :broken_chain | :cycle_detected}
   def recover_from_database(database) do
-    lookaside_buffer = :ets.new(:olivine_lookaside, [:ordered_set, :private])
+    lookaside_buffer = :ets.new(:olivine_lookaside, [:ordered_set, :protected, {:read_concurrency, true}])
 
     # Load the durable version from the database, or use zero version if none exists
     durable_version =
@@ -100,42 +101,34 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
       end
 
     # Traverse pages from page 0 to rebuild page structure and calculate metadata
-    {tree, max_page_id, free_page_ids} =
-      case load_and_rebuild_pages(database) do
-        {:ok, tree, max_page_id, free_page_ids} ->
-          {tree, max_page_id, free_page_ids}
+    case load_and_rebuild_pages(database) do
+      {:ok, tree, max_page_id, free_page_ids} ->
+        # Create initial page_map - if empty database, include page 0 like new() does
+        initial_page_map =
+          if :gb_trees.is_empty(tree) and max_page_id == 0 do
+            %{0 => Page.new(0, [], [])}
+          else
+            %{}
+          end
 
-        {:error, :corrupted_page} ->
-          # Database contains corrupted pages - cannot safely recover
-          raise "Database recovery failed: corrupted page detected. Database integrity is compromised."
+        # Properly reconstruct the last durable version as both current_version and top of versions stack
+        version_manager = %__MODULE__{
+          versions: [{durable_version, {tree, initial_page_map, [], []}}],
+          current_version: durable_version,
+          durable_version: durable_version,
+          window_size_in_microseconds: 5_000_000,
+          lookaside_buffer: lookaside_buffer,
+          max_page_id: max_page_id,
+          free_page_ids: free_page_ids
+        }
 
-        {:error, :broken_chain} ->
-          # Database page chain is broken - cannot safely recover
-          raise "Database recovery failed: broken page chain detected. Database integrity is compromised."
+        {:ok, version_manager}
 
-        {:error, :cycle_detected} ->
-          # Database page chain has a cycle - cannot safely recover
-          raise "Database recovery failed: cycle_detected in page chain. Database integrity is compromised."
-      end
-
-    # Create initial page_map - if empty database, include page 0 like new() does
-    initial_page_map =
-      if :gb_trees.is_empty(tree) and max_page_id == 0 do
-        %{0 => Page.new(0, [], [])}
-      else
-        %{}
-      end
-
-    # Properly reconstruct the last durable version as both current_version and top of versions stack
-    %__MODULE__{
-      versions: [{durable_version, {tree, initial_page_map, [], []}}],
-      current_version: durable_version,
-      durable_version: durable_version,
-      window_size_in_microseconds: 5_000_000,
-      lookaside_buffer: lookaside_buffer,
-      max_page_id: max_page_id,
-      free_page_ids: free_page_ids
-    }
+      {:error, reason} when reason in [:corrupted_page, :broken_chain, :cycle_detected] ->
+        # Clean up the ETS table before returning error
+        :ets.delete(lookaside_buffer)
+        {:error, reason}
+    end
   end
 
   defp load_and_rebuild_pages(database) do
@@ -195,80 +188,90 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     :ok
   end
 
-  @spec fetch(
-          version_manager :: t(),
-          key :: Bedrock.key(),
-          version :: Bedrock.version(),
-          database :: Database.t() | nil
-        ) ::
-          {:ok, Bedrock.value()} | {:error, :not_found | :version_too_old}
-  def fetch(version_manager, key, version, database \\ nil)
-
-  def fetch(version_manager, _key, version, _database) when version < version_manager.durable_version,
-    do: {:error, :version_too_old}
-
-  def fetch(version_manager, _key, version, _database) when version_manager.current_version < version,
-    do: {:error, :not_found}
-
-  def fetch(version_manager, key, version, database) do
-    case find_best_version_for_fetch(version_manager.versions, version) do
-      nil ->
-        {:error, :not_found}
-
-      {tree, page_map, _deleted_page_ids, _modified_page_ids} ->
-        case Tree.page_for_key(tree, key) do
-          nil ->
-            {:error, :not_found}
-
-          page_id ->
-            load_value_fn = create_load_value_fn(version_manager, database)
-            Page.load_and_search_page_simple_with_loader(version_manager, page_id, key, page_map, load_value_fn)
-        end
+  @spec fetch_value(t(), Bedrock.key(), Bedrock.version()) ::
+          {:ok, Bedrock.value()} | {:error, :not_found | :check_database}
+  def fetch_value(version_manager, key, version) do
+    if version > version_manager.durable_version do
+      # Look up in ETS lookaside buffer for recent versions
+      case :ets.lookup(version_manager.lookaside_buffer, {version, key}) do
+        [{_key_version, value}] -> {:ok, value}
+        [] -> {:error, :not_found}
+      end
+    else
+      # Signal that this should be loaded from database instead
+      {:error, :check_database}
     end
   end
 
-  @spec range_fetch(
+  @doc """
+  Returns a value loader function that captures only the minimal data needed
+  for async value resolution tasks. Avoids copying the entire VersionManager.
+  """
+  @spec value_loader(t()) :: (Bedrock.key(), Bedrock.version() ->
+                                {:ok, Bedrock.value()} | {:error, :not_found | :check_database})
+  def value_loader(version_manager) do
+    # Capture only the ETS reference and durable version
+    lookaside_buffer = version_manager.lookaside_buffer
+    durable_version = version_manager.durable_version
+
+    fn
+      key, version when version > durable_version ->
+        case :ets.lookup(lookaside_buffer, {version, key}) do
+          [{_key_version, value}] -> {:ok, value}
+          [] -> {:error, :not_found}
+        end
+
+      _, _ ->
+        {:error, :check_database}
+    end
+  end
+
+  @spec fetch_page_for_key(version_manager :: t(), key :: Bedrock.key(), version :: Bedrock.version()) ::
+          {:ok, Page.t()} | {:error, :not_found | :version_too_old | :version_too_new}
+  def fetch_page_for_key(version_manager, _key, version) when version < version_manager.durable_version,
+    do: {:error, :version_too_old}
+
+  def fetch_page_for_key(version_manager, _key, version) when version_manager.current_version < version,
+    do: {:error, :version_too_new}
+
+  def fetch_page_for_key(version_manager, key, version) do
+    with {tree, page_map, _, _} <- find_best_version_for_fetch(version_manager.versions, version),
+         page_id when is_integer(page_id) <- Tree.page_for_key(tree, key) do
+      {:ok, Map.fetch!(page_map, page_id)}
+    else
+      nil -> {:error, :not_found}
+    end
+  end
+
+  @spec fetch_pages_for_range(
           version_manager :: t(),
           start_key :: Bedrock.key(),
           end_key :: Bedrock.key(),
-          version :: Bedrock.version(),
-          database :: Database.t() | nil
+          version :: Bedrock.version()
         ) ::
-          {:ok, [{Bedrock.key(), Bedrock.value()}]}
-          | {:error, :not_found}
-          | {:error, :version_too_old}
-  def range_fetch(version_manager, _start_key, _end_key, version, _database)
+          {:ok, [Page.t()]} | {:error, :version_too_old | :version_too_new}
+  def fetch_pages_for_range(version_manager, _start_key, _end_key, version)
       when version < version_manager.durable_version,
       do: {:error, :version_too_old}
 
-  def range_fetch(version_manager, _start_key, _end_key, version, _database)
+  def fetch_pages_for_range(version_manager, _start_key, _end_key, version)
       when version_manager.current_version < version,
-      do: {:error, :not_found}
+      do: {:error, :version_too_new}
 
-  def range_fetch(version_manager, start_key, end_key, version, database) do
+  def fetch_pages_for_range(version_manager, start_key, end_key, version) do
     case find_best_version_for_fetch(version_manager.versions, version) do
       nil ->
-        {:error, :not_found}
+        {:ok, []}
 
       {tree, page_map, _deleted_page_ids, _modified_page_ids} ->
-        load_value_fn = create_load_value_fn(version_manager, database)
-
-        results =
+        pages =
           tree
-          |> Tree.stream_pages_in_range(page_map, start_key, end_key)
-          |> stream_page_ids_to_pages(page_map)
-          |> Page.stream_keys_in_range(start_key, end_key)
-          |> Stream.map(fn {key, version} ->
-            {:ok, value} = load_value_fn.(key, version)
-            {key, value}
-          end)
-          |> Enum.to_list()
+          |> Tree.page_ids_in_range(start_key, end_key)
+          |> Enum.map(&Map.fetch!(page_map, &1))
 
-        {:ok, results}
+        {:ok, pages}
     end
   end
-
-  defp stream_page_ids_to_pages(stream, page_map), do: Stream.map(stream, &Map.fetch!(page_map, &1))
 
   @spec apply_transactions(version_manager :: t(), encoded_transactions :: [binary()]) :: t()
   def apply_transactions(version_manager, []), do: version_manager
@@ -451,7 +454,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   defp apply_range_clear_mutation(_version_manager, start_key, end_key, _new_version, page_data) do
     {tree, page_map, deleted_page_ids, modified_page_ids} = page_data
 
-    overlapping_pages = Tree.stream_pages_in_range(tree, page_map, start_key, end_key)
+    overlapping_pages = Tree.page_ids_in_range(tree, start_key, end_key)
 
     Enum.reduce(overlapping_pages, {tree, page_map, deleted_page_ids, modified_page_ids}, fn page_id,
                                                                                              {tree_acc, page_map_acc,
@@ -571,7 +574,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   end
 
   # Helper functions using consolidation principles
-  @spec persist_pages_batch([page()], Database.t()) :: :ok | {:error, term()}
+  @spec persist_pages_batch([Page.t()], Database.t()) :: :ok | {:error, term()}
   defp persist_pages_batch(pages, database) do
     Enum.reduce_while(pages, :ok, fn page, :ok ->
       page_binary = Page.to_binary(page)
@@ -806,22 +809,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     find_first_valid_version(versions, target_version)
   end
 
-  # Creates a curried load value function with intelligent routing between ETS and database.
-  # Applies consolidation principle by extracting common pattern used in fetch and range_fetch.
-  # Uses guard clauses for efficient version-based routing.
-  @spec create_load_value_fn(t(), Database.t() | nil) ::
-          (Bedrock.key(), Bedrock.version() -> {:ok, Bedrock.value()} | {:error, term()})
-  defp create_load_value_fn(version_manager, database) do
-    fn
-      key, version when version > version_manager.durable_version ->
-        [{{^version, ^key}, value}] = :ets.lookup(version_manager.lookaside_buffer, {version, key})
-        {:ok, value}
-
-      key, _version ->
-        Database.load_value(database, key)
-    end
-  end
-
   defp find_first_valid_version([], _target_version), do: nil
 
   defp find_first_valid_version([{version, data} | rest], target_version) do
@@ -832,13 +819,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     end
   end
 
-  @doc """
-  Loads a page and searches for a specific key using simple lookup (no version comparison).
-  Once we have the correct version's page_map, all keys are the correct version.
-  """
-
-  @spec split_page_with_tree_update(page :: page(), version_manager :: t()) ::
-          {{page(), page()}, t()} | {:error, :no_split_needed}
+  @spec split_page_with_tree_update(page :: Page.t(), version_manager :: t()) ::
+          {{Page.t(), Page.t()}, t()} | {:error, :no_split_needed}
   def split_page_with_tree_update(page, version_manager) do
     case Page.split_page_simple(page, version_manager) do
       {:error, :no_split_needed} = error ->

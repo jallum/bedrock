@@ -43,20 +43,50 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   end
 
   @impl true
-  def handle_call({:fetch, key, version, _opts}, from, %State{} = t) do
-    case Logic.try_fetch_or_waitlist(t, key, version, from) do
-      {:ok, value, new_state} -> reply(new_state, {:ok, value})
-      {:error, reason, new_state} -> reply(new_state, {:error, reason})
-      {:waitlist, new_state} -> noreply(new_state)
+  def handle_call({:fetch, key, version, opts}, from, %State{} = t) do
+    reply_fn = reply_fn_for(from)
+    fetch_opts = Keyword.put(opts, :reply_fn, reply_fn)
+
+    case Logic.fetch(t, key, version, fetch_opts) do
+      :ok ->
+        # Async mode - value resolution happening asynchronously, reply will come via reply_fn
+        noreply(t)
+
+      {:error, :version_too_new} ->
+        if wait_ms = opts[:wait_ms] do
+          t
+          |> Logic.add_to_waitlist({key, version}, version, reply_fn, wait_ms)
+          |> noreply()
+        else
+          reply(t, {:error, :version_too_new})
+        end
+
+      {:error, reason} ->
+        reply(t, {:error, reason})
     end
   end
 
   @impl true
-  def handle_call({:range_fetch, start_key, end_key, version, _opts}, from, %State{} = t) do
-    case Logic.try_range_fetch_or_waitlist(t, start_key, end_key, version, from) do
-      {:ok, results, new_state} -> reply(new_state, {:ok, results})
-      {:error, reason, new_state} -> reply(new_state, {:error, reason})
-      {:waitlist, new_state} -> noreply(new_state)
+  def handle_call({:range_fetch, start_key, end_key, version, opts}, from, %State{} = t) do
+    reply_fn = reply_fn_for(from)
+    fetch_opts = Keyword.put(opts, :reply_fn, reply_fn)
+
+    case Logic.range_fetch(t, start_key, end_key, version, fetch_opts) do
+      :ok ->
+        # Async mode - value resolution happening asynchronously, reply will come via reply_fn
+        noreply(t)
+
+      {:error, :version_too_new} ->
+        if wait_ms = opts[:wait_ms] do
+          t
+          |> Logic.add_to_waitlist({start_key, end_key, version}, version, reply_fn, wait_ms)
+          |> noreply()
+        else
+          reply(t, {:error, :version_too_new})
+        end
+
+      {:error, reason} ->
+        reply(t, {:error, reason})
     end
   end
 
@@ -116,4 +146,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   def handle_info(_msg, state) do
     {:noreply, state}
   end
+
+  defp reply_fn_for(from), do: fn result -> GenServer.reply(from, result) end
 end

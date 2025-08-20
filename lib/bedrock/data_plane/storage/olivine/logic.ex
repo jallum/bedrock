@@ -10,7 +10,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.State
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager
-  alias Bedrock.DataPlane.Version
+  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
   alias Bedrock.Internal.WaitingList
   alias Bedrock.Service.Worker
 
@@ -18,9 +18,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
           {:ok, State.t()} | {:error, File.posix()} | {:error, term()}
   def startup(otp_name, foreman, id, path) do
     with :ok <- ensure_directory_exists(path),
-         {:ok, database} <- Database.open(:"#{otp_name}_db", Path.join(path, "dets")) do
-      version_manager = VersionManager.recover_from_database(database)
-
+         {:ok, database} <- Database.open(:"#{otp_name}_db", Path.join(path, "dets")),
+         {:ok, version_manager} <- VersionManager.recover_from_database(database) do
       {:ok,
        %State{
          path: path,
@@ -79,126 +78,167 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
     end
   end
 
-  @spec fetch(State.t(), Bedrock.key(), Version.t()) ::
-          {:error, :key_out_of_range | :not_found | :version_too_old} | {:ok, binary()}
-  def fetch(%State{} = t, key, version), do: VersionManager.fetch(t.version_manager, key, version, t.database)
+  @doc """
+  Fetch function with optional async callback support.
 
-  @spec try_fetch_or_waitlist(State.t(), Bedrock.key(), Bedrock.version(), GenServer.from()) ::
-          {:ok, Bedrock.value(), State.t()}
-          | {:error, term(), State.t()}
-          | {:waitlist, State.t()}
-  def try_fetch_or_waitlist(%State{} = t, key, version, from) do
-    current_version = VersionManager.last_committed_version(t.version_manager)
-    durable_version = VersionManager.last_durable_version(t.version_manager)
+  When reply_fn is provided in opts, returns :ok immediately and delivers results via callback.
+  When reply_fn is not provided, returns results synchronously (primarily for testing).
+  """
+  @spec fetch(State.t(), Bedrock.key(), Bedrock.version(), opts :: [reply_fn: function()]) ::
+          {:ok, binary()} | :ok | {:error, :not_found} | {:error, :version_too_old} | {:error, :version_too_new}
+  def fetch(%State{} = t, key, version, opts \\ []) do
+    case VersionManager.fetch_page_for_key(t.version_manager, key, version) do
+      {:ok, page} ->
+        resolve_fetch_from_page(t, page, key, opts[:reply_fn])
 
-    cond do
-      current_version < version ->
-        fetch_data = {key, version}
-        reply_fn = fn result -> GenServer.reply(from, result) end
-        timeout_ms = 30_000
-
-        {new_waiting, _timeout} =
-          WaitingList.insert(
-            t.waiting_fetches,
-            version,
-            fetch_data,
-            reply_fn,
-            timeout_ms
-          )
-
-        {:waitlist, %{t | waiting_fetches: new_waiting}}
-
-      version < durable_version ->
-        {:error, :version_too_old, t}
-
-      true ->
-        case VersionManager.fetch(t.version_manager, key, version, t.database) do
-          {:ok, value} ->
-            {:ok, value, t}
-
-          {:error, :version_too_old} ->
-            {:error, :version_too_old, t}
-
-          {:error, :not_found} ->
-            {:error, :not_found, t}
-        end
+      error ->
+        error
     end
   end
 
-  @spec try_range_fetch_or_waitlist(State.t(), Bedrock.key(), Bedrock.key(), Bedrock.version(), GenServer.from()) ::
-          {:ok, [{Bedrock.key(), Bedrock.value()}], State.t()}
-          | {:error, term(), State.t()}
-          | {:waitlist, State.t()}
-  def try_range_fetch_or_waitlist(%State{} = t, start_key, end_key, version, from) do
-    current_version = VersionManager.last_committed_version(t.version_manager)
-    durable_version = VersionManager.last_durable_version(t.version_manager)
+  @doc """
+  Range fetch function with optional async callback support.
 
-    cond do
-      current_version < version ->
-        range_fetch_data = {start_key, end_key, version}
-        reply_fn = fn result -> GenServer.reply(from, result) end
-        timeout_ms = 30_000
+  When reply_fn is provided in opts, returns :ok immediately and delivers results via callback.
+  When reply_fn is not provided, returns results synchronously (primarily for testing).
+  """
+  @spec range_fetch(
+          State.t(),
+          Bedrock.key(),
+          Bedrock.key(),
+          Bedrock.version(),
+          opts :: [reply_fn: function(), limit: pos_integer()]
+        ) ::
+          {:ok, [{Bedrock.key(), Bedrock.value()}]} | :ok | {:error, :version_too_old} | {:error, :version_too_new}
+  def range_fetch(t, start_key, end_key, version, opts \\ []) do
+    case VersionManager.fetch_pages_for_range(t.version_manager, start_key, end_key, version) do
+      {:ok, pages} ->
+        resolve_range_from_pages(t, pages, start_key, end_key, opts)
 
-        {new_waiting, _timeout} =
-          WaitingList.insert(
-            t.waiting_fetches,
-            version,
-            range_fetch_data,
-            reply_fn,
-            timeout_ms
-          )
-
-        {:waitlist, %{t | waiting_fetches: new_waiting}}
-
-      version < durable_version ->
-        {:error, :version_too_old, t}
-
-      true ->
-        case VersionManager.range_fetch(t.version_manager, start_key, end_key, version, t.database) do
-          {:ok, results} ->
-            {:ok, results, t}
-
-          {:error, :version_too_old} ->
-            {:error, :version_too_old, t}
-
-          {:error, :not_found} ->
-            {:ok, [], t}
-        end
+      error ->
+        error
     end
+  end
+
+  defp apply_limit(stream, nil), do: stream
+  defp apply_limit(stream, limit) when is_integer(limit) and limit > 0, do: Stream.take(stream, limit)
+
+  @doc """
+  Adds a fetch request to the waitlist.
+
+  Used by the Server when a version_too_new error occurs and wait_ms is specified.
+  """
+  @spec add_to_waitlist(State.t(), term(), Bedrock.version(), function(), pos_integer()) :: State.t()
+  def add_to_waitlist(%State{} = t, fetch_request, version, reply_fn, timeout_in_ms) do
+    {new_waiting, _timeout} =
+      WaitingList.insert(
+        t.waiting_fetches,
+        version,
+        fetch_request,
+        reply_fn,
+        timeout_in_ms
+      )
+
+    %{t | waiting_fetches: new_waiting}
+  end
+
+  defp minimal_load_fn(t) do
+    vm_loader = VersionManager.value_loader(t.version_manager)
+    db_loader = Database.value_loader(t.database)
+
+    fn key, version ->
+      case vm_loader.(key, version) do
+        {:ok, value} ->
+          value
+
+        {:error, :check_database} ->
+          {:ok, value} = db_loader.(key)
+          value
+
+        {:error, :not_found} ->
+          raise "Key not found"
+      end
+    end
+  end
+
+  defp resolve_fetch_from_page(t, page, key, reply_fn) do
+    load_fn = minimal_load_fn(t)
+
+    if reply_fn do
+      Task.start(fn ->
+        page
+        |> resolve_fetch_from_page_with_loader(key, load_fn)
+        |> reply_fn.()
+      end)
+
+      :ok
+    else
+      resolve_fetch_from_page_with_loader(page, key, load_fn)
+    end
+  end
+
+  defp resolve_fetch_from_page_with_loader(page, key, load_fn) do
+    case Page.find_version_for_key(page, key) do
+      {:ok, found_version} ->
+        result = load_fn.(key, found_version)
+        {:ok, result}
+
+      error ->
+        error
+    end
+  end
+
+  defp resolve_range_from_pages(t, pages, start_key, end_key, opts) do
+    load_fn = minimal_load_fn(t)
+
+    if reply_fn = opts[:reply_fn] do
+      Task.start(fn ->
+        pages
+        |> resolve_range_from_pages_with_loader(start_key, end_key, opts[:limit], load_fn)
+        |> reply_fn.()
+      end)
+
+      :ok
+    else
+      resolve_range_from_pages_with_loader(pages, start_key, end_key, opts[:limit], load_fn)
+    end
+  end
+
+  defp resolve_range_from_pages_with_loader(pages, start_key, end_key, limit, load_fn) do
+    key_value_pairs =
+      pages
+      |> Page.stream_key_versions_in_range(start_key, end_key)
+      |> apply_limit(limit)
+      |> Enum.map(fn {key, version} ->
+        value = load_fn.(key, version)
+        {key, value}
+      end)
+
+    {:ok, key_value_pairs}
   end
 
   @spec notify_waiting_fetches(State.t(), Bedrock.version()) :: State.t()
   def notify_waiting_fetches(%State{} = t, applied_version) do
-    {new_waiting, notified_entries} = WaitingList.remove_all(t.waiting_fetches, applied_version)
+    {new_waiting, fetches_to_run} = WaitingList.remove_all(t.waiting_fetches, applied_version)
 
-    Enum.each(notified_entries, fn {_deadline, reply_fn, fetch_data} ->
-      handle_fetch_request(t, fetch_data, reply_fn)
+    Enum.each(fetches_to_run, fn
+      {_deadline, reply_fn, fetch_request} ->
+        run_fetch_and_notify(t, reply_fn, fetch_request)
     end)
 
     %{t | waiting_fetches: new_waiting}
   end
 
-  defp handle_fetch_request(t, fetch_data, reply_fn) do
-    case fetch_data do
-      {key, version} ->
-        handle_single_key_fetch(t, key, version, reply_fn)
-
-      {start_key, end_key, version} ->
-        handle_range_fetch(t, start_key, end_key, version, reply_fn)
-    end
-  end
-
-  defp handle_single_key_fetch(t, key, version, reply_fn) do
-    case VersionManager.fetch(t.version_manager, key, version, t.database) do
-      {:ok, value} -> reply_fn.({:ok, value})
+  defp run_fetch_and_notify(t, reply_fn, {key, version}) do
+    case fetch(t, key, version, reply_fn: reply_fn) do
+      :ok -> :ok
       error -> reply_fn.(error)
     end
   end
 
-  defp handle_range_fetch(t, start_key, end_key, version, reply_fn) do
-    case VersionManager.range_fetch(t.version_manager, start_key, end_key, version, t.database) do
-      {:ok, results} -> reply_fn.({:ok, results})
-      {:error, :not_found} -> reply_fn.({:ok, []})
+  defp run_fetch_and_notify(t, reply_fn, {start_key, end_key, version}) do
+    case range_fetch(t, start_key, end_key, version, reply_fn: reply_fn) do
+      :ok -> :ok
       error -> reply_fn.(error)
     end
   end

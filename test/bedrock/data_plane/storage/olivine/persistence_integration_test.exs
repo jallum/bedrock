@@ -120,11 +120,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       Database.close(db1)
 
-      assert_raise RuntimeError,
-                   "Database recovery failed: corrupted page detected. Database integrity is compromised.",
-                   fn ->
-                     Logic.startup(:corrupt_recovery, self(), :test_id, tmp_dir)
-                   end
+      # Recovery should return error when encountering corrupted pages
+      assert {:error, :corrupted_page} = Logic.startup(:corrupt_recovery, self(), :test_id, tmp_dir)
     end
 
     test "large dataset recovery performance", %{tmp_dir: tmp_dir} do
@@ -572,7 +569,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       # Session 2: Restart and verify window behavior
       {:ok, db2} = Database.open(:session2, file_path)
-      vm2 = VersionManager.recover_from_database(db2)
+      {:ok, vm2} = VersionManager.recover_from_database(db2)
 
       # Data should still be accessible regardless of in-memory window state
       # (without version since DETS stores version-less)

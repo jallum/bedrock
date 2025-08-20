@@ -14,7 +14,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
   @type t :: t()
 
   @type page_id :: Page.id()
-  @type page :: Page.page()
+  @type page :: Page.t()
 
   @doc """
   Builds a page tree from a page map by adding each page to an empty tree.
@@ -107,44 +107,54 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
   defp first_and_last([first | rest]), do: {first, List.last(rest)}
 
   @doc """
-  Finds all pages that overlap with the given query range.
-  Uses tree for initial lookup, then walks page chain for optimal performance.
+  Returns page IDs for all pages that overlap with the given query range.
+  Uses boundary-based tree traversal with minimal comparisons for optimal efficiency.
 
   Algorithm:
-  1. Use tree to find first page containing query_start (O(log n))
-  2. Walk page chain until page.first_key > query_end (O(k) where k = overlapping pages)
+  1. find_and_collect_overlapping: Navigate tree seeking pages that overlap [query_start, query_end)
+  2. collect_all_until_boundary: Once found, collect all remaining pages until boundary (no overlap checks!)
 
-  Since we start from a page containing query_start, we only need query_end to know when to stop.
-  Much more efficient than tree iteration since we leverage the page chain structure.
+  This is O(log n + k) where k is the number of overlapping pages.
+  Minimizes comparisons by switching to collection mode after finding boundaries.
   """
-  @spec stream_pages_in_range(
-          t(),
-          %{page_id() => page()},
-          Bedrock.key(),
-          Bedrock.key()
-        ) :: Enumerable.t()
-  def stream_pages_in_range(tree, page_map, query_start, query_end) do
-    case page_for_key(tree, query_start) do
-      nil -> []
-      first_page_id -> walk_page_chain_for_overlaps(page_map, first_page_id, query_end)
+  @spec page_ids_in_range(t(), Bedrock.key(), Bedrock.key()) :: Enumerable.t({Bedrock.key(), page_id()})
+  def page_ids_in_range({size, tree_node}, query_start, query_end) when size > 0,
+    do: collect_pages_in_range(tree_node, query_start, query_end)
+
+  def page_ids_in_range(_, _query_start, _query_end), do: []
+
+  defp collect_pages_in_range(tree_node, query_start, query_end) do
+    tree_node
+    |> find_and_collect_overlapping(query_start, query_end, [])
+    |> Enum.reverse()
+  end
+
+  defp find_and_collect_overlapping(nil, _query_start, _query_end, acc), do: acc
+
+  defp find_and_collect_overlapping({last_key, _, _left, right}, query_start, query_end, acc)
+       when last_key < query_start,
+       do: find_and_collect_overlapping(right, query_start, query_end, acc)
+
+  defp find_and_collect_overlapping({last_key, {page_id, first_key}, left, right}, query_start, query_end, acc) do
+    acc_after_left = find_and_collect_overlapping(left, query_start, query_end, acc)
+
+    if first_key <= query_end and last_key >= query_start do
+      acc_with_current = [page_id | acc_after_left]
+      collect_all_until_boundary(right, query_end, acc_with_current)
+    else
+      find_and_collect_overlapping(right, query_start, query_end, acc_after_left)
     end
   end
 
-  defp walk_page_chain_for_overlaps(page_map, first_page_id, query_end) do
-    Stream.unfold(first_page_id, fn
-      nil ->
-        nil
+  defp collect_all_until_boundary(nil, _query_end, acc), do: acc
 
-      current_page_id ->
-        page_map
-        |> Map.fetch!(current_page_id)
-        |> case do
-          %{keys: [first_key | _], next_id: next_id} when first_key <= query_end ->
-            {current_page_id, if(next_id == 0, do: nil, else: next_id)}
-
-          _ ->
-            nil
-        end
-    end)
+  defp collect_all_until_boundary({_last_key, {page_id, first_key}, left, right}, query_end, acc) do
+    if first_key > query_end do
+      acc
+    else
+      acc_after_left = collect_all_until_boundary(left, query_end, acc)
+      acc_with_current = [page_id | acc_after_left]
+      collect_all_until_boundary(right, query_end, acc_with_current)
+    end
   end
 end
