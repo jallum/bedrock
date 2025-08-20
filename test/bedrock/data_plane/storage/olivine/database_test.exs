@@ -3,6 +3,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
 
+  defp with_db(context, file_name, table_name) do
+    tmp_dir = context[:tmp_dir] || raise "tmp_dir not available in context"
+    file_path = Path.join(tmp_dir, file_name)
+    {:ok, db} = Database.open(table_name, file_path)
+    on_exit(fn -> Database.close(db) end)
+    {:ok, db: db}
+  end
+
   describe "database lifecycle" do
     @tag :tmp_dir
 
@@ -73,16 +81,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   end
 
   describe "page operations" do
-    @tag :db_setup
-    setup %{tmp_dir: tmp_dir} do
-      table_name = :pages_test
-      file_path = Path.join(tmp_dir, "pages.dets")
-      {:ok, db} = Database.open(table_name, file_path)
-
-      on_exit(fn -> Database.close(db) end)
-
-      {:ok, db: db}
-    end
+    setup context, do: with_db(context, "pages.dets", :pages_test)
 
     @tag :tmp_dir
     test "store_page/3 and load_page/2 work correctly", %{db: db} do
@@ -122,16 +121,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   end
 
   describe "value operations" do
-    @tag :db_setup
-    setup %{tmp_dir: tmp_dir} do
-      table_name = :values_test
-      file_path = Path.join(tmp_dir, "values.dets")
-      {:ok, db} = Database.open(table_name, file_path)
-
-      on_exit(fn -> Database.close(db) end)
-
-      {:ok, db: db}
-    end
+    setup context, do: with_db(context, "values.dets", :values_test)
 
     @tag :tmp_dir
     test "store_value/3 and load_value/2 work correctly", %{db: db} do
@@ -186,16 +176,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   end
 
   describe "database info and statistics" do
-    @tag :db_setup
-    setup %{tmp_dir: tmp_dir} do
-      table_name = :info_test
-      file_path = Path.join(tmp_dir, "info.dets")
-      {:ok, db} = Database.open(table_name, file_path)
-
-      on_exit(fn -> Database.close(db) end)
-
-      {:ok, db: db}
-    end
+    setup context, do: with_db(context, "info.dets", :info_test)
 
     @tag :tmp_dir
     test "info/2 returns database statistics", %{db: db} do
@@ -224,16 +205,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   end
 
   describe "DETS schema verification" do
-    @tag :db_setup
-    setup %{tmp_dir: tmp_dir} do
-      table_name = :schema_test
-      file_path = Path.join(tmp_dir, "schema.dets")
-      {:ok, db} = Database.open(table_name, file_path)
-
-      on_exit(fn -> Database.close(db) end)
-
-      {:ok, db: db}
-    end
+    setup context, do: with_db(context, "schema.dets", :schema_test)
 
     @tag :tmp_dir
     test "natural type separation works correctly", %{db: db} do
