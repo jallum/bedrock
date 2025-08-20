@@ -140,9 +140,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
   defp load_and_rebuild_pages(database) do
     case load_page_chain(database, 0, %{}) do
-      {:ok, page_map} when map_size(page_map) == 0 ->
-        {:ok, :gb_trees.empty(), 0, []}
-
       {:ok, page_map} ->
         tree = Tree.from_page_map(page_map)
         page_ids = page_map |> Map.keys() |> MapSet.new()
@@ -150,6 +147,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
         free_page_ids = calculate_free_page_ids(max_page_id, page_ids)
 
         {:ok, tree, max_page_id, free_page_ids}
+
+      {:error, :no_chain} ->
+        {:ok, :gb_trees.empty(), 0, []}
 
       {:error, reason} ->
         {:error, reason}
@@ -159,49 +159,27 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   defp load_page_chain(_database, page_id, page_map) when is_map_key(page_map, page_id), do: {:error, :cycle_detected}
 
   defp load_page_chain(database, page_id, page_map) do
-    case Database.load_page(database, page_id) do
-      {:ok, page_binary} ->
-        process_loaded_page(database, page_binary, page_id, page_map)
-
-      {:error, :not_found} when page_id == 0 ->
-        {:ok, %{}}
-
-      {:error, :not_found} ->
-        {:error, :broken_chain}
+    with {:ok, page_binary} <- Database.load_page(database, page_id),
+         {:ok, page} <- Page.from_binary(page_binary) do
+      page_map
+      |> Map.put(page_id, page)
+      |> continue_page_chain(database, page)
+    else
+      {:error, :not_found} when page_id == 0 -> {:error, :no_chain}
+      {:error, :not_found} -> {:error, :broken_chain}
+      {:error, _reason} -> {:error, :corrupted_page}
     end
   end
 
-  defp process_loaded_page(database, page_binary, page_id, page_map) do
-    case Page.from_binary(page_binary) do
-      {:ok, page} ->
-        updated_page_map = Map.put(page_map, page_id, page)
-        continue_page_chain(database, page, updated_page_map)
+  defp continue_page_chain(page_map, _database, %{next_id: 0}), do: {:ok, page_map}
+  defp continue_page_chain(page_map, database, %{next_id: next_id}), do: load_page_chain(database, next_id, page_map)
 
-      {:error, _reason} ->
-        {:error, :corrupted_page}
-    end
-  end
-
-  defp continue_page_chain(database, page, updated_page_map) do
-    case page.next_id do
-      0 ->
-        {:ok, updated_page_map}
-
-      next_id ->
-        load_page_chain(database, next_id, updated_page_map)
-    end
-  end
-
-  defp calculate_free_page_ids(max_page_id, _all_existing_page_ids) when max_page_id <= 0 do
-    []
-  end
+  defp calculate_free_page_ids(0, _all_existing_page_ids), do: []
 
   defp calculate_free_page_ids(max_page_id, all_existing_page_ids) do
-    all_possible_ids = MapSet.new(0..max_page_id)
-
-    all_possible_ids
+    0..max_page_id
+    |> MapSet.new()
     |> MapSet.difference(all_existing_page_ids)
-    |> MapSet.to_list()
     |> Enum.sort()
   end
 
