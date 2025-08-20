@@ -12,20 +12,23 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
     Enum.map(int_versions, &Version.from_integer/1)
   end
 
-  @tmp_dir "/tmp/olivine_integration_test"
-
-  setup do
-    File.rm_rf(@tmp_dir)
-    File.mkdir_p!(@tmp_dir)
-
-    on_exit(fn ->
-      File.rm_rf(@tmp_dir)
-    end)
-
-    {:ok, tmp_dir: @tmp_dir}
-  end
-
   describe "full persistence and recovery lifecycle" do
+    @tag :tmp_dir
+
+    setup context do
+      tmp_dir =
+        context[:tmp_dir] ||
+          Path.join(System.tmp_dir!(), "persistence_lifecycle_test_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+
+      on_exit(fn ->
+        File.rm_rf(tmp_dir)
+      end)
+
+      {:ok, tmp_dir: tmp_dir}
+    end
+
     test "server startup with empty database initializes correctly", %{tmp_dir: tmp_dir} do
       {:ok, state} = Logic.startup(:test_startup, self(), :test_id, tmp_dir)
 
@@ -210,6 +213,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
   end
 
   describe "edge cases and error conditions" do
+    @tag :tmp_dir
+
+    setup context do
+      tmp_dir =
+        context[:tmp_dir] ||
+          Path.join(System.tmp_dir!(), "persistence_edge_cases_test_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+
+      on_exit(fn ->
+        File.rm_rf(tmp_dir)
+      end)
+
+      {:ok, tmp_dir: tmp_dir}
+    end
+
     test "recovery with missing page 0 creates empty state", %{tmp_dir: tmp_dir} do
       # Create database with pages but no page 0
       {:ok, db1} = Database.open(:no_zero, Path.join(tmp_dir, "dets"))
@@ -278,6 +297,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
   end
 
   describe "Phase 1.3 success criteria verification" do
+    @tag :tmp_dir
+
+    setup context do
+      tmp_dir =
+        context[:tmp_dir] ||
+          Path.join(System.tmp_dir!(), "persistence_criteria_test_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+
+      on_exit(fn ->
+        File.rm_rf(tmp_dir)
+      end)
+
+      {:ok, tmp_dir: tmp_dir}
+    end
+
     test "pages persist to DETS and can be retrieved", %{tmp_dir: tmp_dir} do
       {:ok, state} = Logic.startup(:criteria_pages, self(), :test_id, tmp_dir)
 
@@ -383,6 +418,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
   end
 
   describe "window eviction with persistence (Phase 2.1)" do
+    @tag :tmp_dir
+
+    setup context do
+      tmp_dir =
+        context[:tmp_dir] ||
+          Path.join(System.tmp_dir!(), "persistence_window_test_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+
+      on_exit(fn ->
+        File.rm_rf(tmp_dir)
+      end)
+
+      {:ok, tmp_dir: tmp_dir}
+    end
+
     test "window eviction maintains data integrity in DETS", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "window_eviction.dets")
       {:ok, db} = Database.open(:window_test, file_path)

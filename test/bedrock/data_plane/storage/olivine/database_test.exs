@@ -3,20 +3,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
 
-  @tmp_dir "/tmp/olivine_database_test"
-
-  setup do
-    File.rm_rf(@tmp_dir)
-    File.mkdir_p!(@tmp_dir)
-
-    on_exit(fn ->
-      File.rm_rf(@tmp_dir)
-    end)
-
-    {:ok, tmp_dir: @tmp_dir}
-  end
-
   describe "database lifecycle" do
+    @tag :tmp_dir
+
+    setup context do
+      tmp_dir =
+        context[:tmp_dir] || Path.join(System.tmp_dir!(), "db_lifecycle_test_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+
+      on_exit(fn ->
+        File.rm_rf(tmp_dir)
+      end)
+
+      {:ok, tmp_dir: tmp_dir}
+    end
+
     test "open/2 creates and opens a DETS database", %{tmp_dir: tmp_dir} do
       table_name = String.to_atom("test_db_#{System.unique_integer([:positive])}")
       file_path = Path.join(tmp_dir, "test_#{table_name}.dets")
@@ -71,9 +73,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   end
 
   describe "page operations" do
+    @tag :db_setup
     setup %{tmp_dir: tmp_dir} do
-      table_name = String.to_atom("pages_test_#{System.unique_integer([:positive])}_#{:erlang.system_time()}")
-      file_path = Path.join(tmp_dir, "pages_#{table_name}.dets")
+      table_name = :pages_test
+      file_path = Path.join(tmp_dir, "pages.dets")
       {:ok, db} = Database.open(table_name, file_path)
 
       on_exit(fn -> Database.close(db) end)
@@ -81,6 +84,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       {:ok, db: db}
     end
 
+    @tag :tmp_dir
     test "store_page/3 and load_page/2 work correctly", %{db: db} do
       page_binary = <<"this is a test page">>
 
@@ -90,10 +94,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       assert loaded_page == page_binary
     end
 
+    @tag :tmp_dir
     test "load_page/2 returns error for non-existent page", %{db: db} do
       assert {:error, :not_found} = Database.load_page(db, 999)
     end
 
+    @tag :tmp_dir
     test "store_page/3 overwrites existing pages", %{db: db} do
       :ok = Database.store_page(db, 1, <<"original">>)
       :ok = Database.store_page(db, 1, <<"updated">>)
@@ -102,6 +108,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       assert loaded == <<"updated">>
     end
 
+    @tag :tmp_dir
     test "get_all_page_ids/1 returns all stored page IDs", %{db: db} do
       :ok = Database.store_page(db, 1, <<"page1">>)
       :ok = Database.store_page(db, 5, <<"page5">>)
@@ -115,9 +122,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   end
 
   describe "value operations" do
+    @tag :db_setup
     setup %{tmp_dir: tmp_dir} do
-      table_name = String.to_atom("values_test_#{System.unique_integer([:positive])}_#{:erlang.system_time()}")
-      file_path = Path.join(tmp_dir, "values_#{table_name}.dets")
+      table_name = :values_test
+      file_path = Path.join(tmp_dir, "values.dets")
       {:ok, db} = Database.open(table_name, file_path)
 
       on_exit(fn -> Database.close(db) end)
@@ -125,6 +133,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       {:ok, db: db}
     end
 
+    @tag :tmp_dir
     test "store_value/3 and load_value/2 work correctly", %{db: db} do
       key = <<"test_key">>
       value = <<"test_value">>
@@ -135,10 +144,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       assert loaded_value == value
     end
 
+    @tag :tmp_dir
     test "load_value/2 returns error for non-existent key", %{db: db} do
       assert {:error, :not_found} = Database.load_value(db, <<"missing">>)
     end
 
+    @tag :tmp_dir
     test "store_value/3 handles last-write-wins behavior", %{db: db} do
       :ok = Database.store_value(db, <<"key1">>, <<"initial_value">>)
 
@@ -153,6 +164,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       assert val2 == <<"different_key">>
     end
 
+    @tag :tmp_dir
     test "batch_store_values/2 stores multiple values efficiently", %{db: db} do
       values = [
         {<<"key1">>, <<"value1">>},
@@ -174,9 +186,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   end
 
   describe "database info and statistics" do
+    @tag :db_setup
     setup %{tmp_dir: tmp_dir} do
-      table_name = String.to_atom("info_test_#{System.unique_integer([:positive])}_#{:erlang.system_time()}")
-      file_path = Path.join(tmp_dir, "info_#{table_name}.dets")
+      table_name = :info_test
+      file_path = Path.join(tmp_dir, "info.dets")
       {:ok, db} = Database.open(table_name, file_path)
 
       on_exit(fn -> Database.close(db) end)
@@ -184,6 +197,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       {:ok, db: db}
     end
 
+    @tag :tmp_dir
     test "info/2 returns database statistics", %{db: db} do
       assert Database.info(db, :n_keys) == 0
       assert Database.info(db, :size_in_bytes) >= 0
@@ -197,10 +211,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       assert Database.info(db, :size_in_bytes) > 0
     end
 
+    @tag :tmp_dir
     test "info/2 handles unknown statistics", %{db: db} do
       assert Database.info(db, :unknown_stat) == :undefined
     end
 
+    @tag :tmp_dir
     test "sync/1 forces data to disk", %{db: db} do
       :ok = Database.store_page(db, 1, <<"test">>)
       assert :ok = Database.sync(db)
@@ -208,9 +224,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   end
 
   describe "DETS schema verification" do
+    @tag :db_setup
     setup %{tmp_dir: tmp_dir} do
-      table_name = String.to_atom("schema_test_#{System.unique_integer([:positive])}_#{:erlang.system_time()}")
-      file_path = Path.join(tmp_dir, "schema_#{table_name}.dets")
+      table_name = :schema_test
+      file_path = Path.join(tmp_dir, "schema.dets")
       {:ok, db} = Database.open(table_name, file_path)
 
       on_exit(fn -> Database.close(db) end)
@@ -218,6 +235,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       {:ok, db: db}
     end
 
+    @tag :tmp_dir
     test "natural type separation works correctly", %{db: db} do
       :ok = Database.store_page(db, 42, <<"page_data">>)
 
@@ -233,6 +251,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       assert page_ids == [42]
     end
 
+    @tag :tmp_dir
     test "handles edge cases in schema separation", %{db: db} do
       :ok = Database.store_value(db, <<42>>, <<"binary_42">>)
 
