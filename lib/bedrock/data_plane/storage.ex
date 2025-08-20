@@ -47,6 +47,29 @@ defmodule Bedrock.DataPlane.Storage do
     do: call(storage, {:fetch, key, version, opts}, opts[:timeout] || :infinity)
 
   @doc """
+  Returns key-value pairs for keys in the given range at the specified version.
+
+  Range is [start_key, end_key) - includes start_key, excludes end_key.
+  Only supported by Olivine storage engine; Basalt returns {:error, :unsupported}.
+  """
+  @spec range_fetch(
+          storage_ref :: ref(),
+          start_key :: Bedrock.key(),
+          end_key :: Bedrock.key(),
+          version :: Bedrock.version(),
+          opts :: [timeout: timeout()]
+        ) ::
+          {:ok, [{key :: Bedrock.key(), value :: Bedrock.value()}]}
+          | {:error,
+             :timeout
+             | :version_too_old
+             | :version_too_new
+             | :unavailable
+             | :unsupported}
+  def range_fetch(storage, start_key, end_key, version, opts \\ []) when is_binary(start_key) and is_binary(end_key),
+    do: call(storage, {:range_fetch, start_key, end_key, version, opts}, opts[:timeout] || :infinity)
+
+  @doc """
   Request that the storage service lock itself and stop pulling new transactions
   from the logs. This mechanism is used by a newly elected cluster director
   to prevent new transactions from being accepted while it is establishing

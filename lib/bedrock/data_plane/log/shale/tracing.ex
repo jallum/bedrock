@@ -1,4 +1,4 @@
-defmodule Bedrock.DataPlane.Log.Tracing do
+defmodule Bedrock.DataPlane.Log.Shale.Tracing do
   @moduledoc false
   alias Bedrock.DataPlane.Transaction
   alias Bedrock.DataPlane.Version

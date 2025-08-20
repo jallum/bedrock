@@ -1,12 +1,12 @@
-defmodule Bedrock.DataPlane.Storage.Basalt.Server do
+defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   @moduledoc false
   use GenServer
 
   import Bedrock.Internal.GenServer.Replies
 
   alias Bedrock.DataPlane.Storage
-  alias Bedrock.DataPlane.Storage.Basalt.Logic
-  alias Bedrock.DataPlane.Storage.Basalt.State
+  alias Bedrock.DataPlane.Storage.Olivine.Logic
+  alias Bedrock.DataPlane.Storage.Olivine.State
   alias Bedrock.Service.Foreman
 
   @spec child_spec(opts :: keyword()) :: map()
@@ -58,8 +58,12 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Server do
   end
 
   @impl true
-  def handle_call({:range_fetch, _start_key, _end_key, _version, _opts}, _from, %State{} = t) do
-    reply(t, {:error, :unsupported})
+  def handle_call({:range_fetch, start_key, end_key, version, _opts}, from, %State{} = t) do
+    case Logic.try_range_fetch_or_waitlist(t, start_key, end_key, version, from) do
+      {:ok, results, new_state} -> reply(new_state, {:ok, results})
+      {:error, reason, new_state} -> reply(new_state, {:error, reason})
+      {:waitlist, new_state} -> noreply(new_state)
+    end
   end
 
   @impl true
@@ -107,5 +111,17 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Server do
   def handle_info({:transactions_applied, version}, %State{} = t) do
     new_state = Logic.notify_waiting_fetches(t, version)
     noreply(new_state)
+  end
+
+  @impl true
+  def handle_info(_msg, %State{} = t) do
+    # Ignore unknown messages to prevent crashes
+    noreply(t)
+  end
+
+  @impl true
+  def handle_info(_msg, state) do
+    # Handle messages when state is not fully initialized
+    {:noreply, state}
   end
 end

@@ -233,6 +233,8 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.Fetching do
     |> Enum.find_value(fn
       {:ok, {:error, :version_too_old} = error} -> error
       {:ok, {:error, :not_found} = error} -> error
+      # Ignore unsupported storage engines
+      {:ok, {:error, :unsupported}} -> nil
       {:ok, {key_range, storage_server, value}} -> {:ok, key_range, storage_server, value}
       _ -> nil
     end) || :error

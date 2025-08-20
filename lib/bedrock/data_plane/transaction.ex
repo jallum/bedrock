@@ -375,6 +375,20 @@ defmodule Bedrock.DataPlane.Transaction do
   end
 
   @doc """
+  Streams mutations from the transaction, raising if the transaction is invalid.
+
+  Returns a stream of mutations. Use this when you're confident the transaction
+  is valid or want to fail fast on invalid data.
+  """
+  @spec stream_mutations!(binary()) :: Enumerable.t()
+  def stream_mutations!(encoded_transaction) do
+    case stream_mutations(encoded_transaction) do
+      {:ok, stream} -> stream
+      {:error, reason} -> raise "Failed to stream mutations: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
   Adds a commit version to an existing transaction.
   """
   @spec add_commit_version(binary(), binary()) :: {:ok, binary()} | {:error, reason :: term()}
@@ -394,6 +408,21 @@ defmodule Bedrock.DataPlane.Transaction do
       {:ok, <<_::unsigned-big-64>> = version} -> {:ok, version}
       {:error, :section_not_found} -> {:ok, nil}
       error -> error
+    end
+  end
+
+  @doc """
+  Extracts the commit version from the COMMIT_VERSION section, raising if not present.
+
+  Raises if the commit version is not present or if there's an error.
+  Use this when you require a commit version to be present.
+  """
+  @spec extract_commit_version!(binary()) :: binary()
+  def extract_commit_version!(encoded_transaction) do
+    case extract_commit_version(encoded_transaction) do
+      {:ok, version} when is_binary(version) -> version
+      {:ok, nil} -> raise "Transaction missing required commit version"
+      {:error, reason} -> raise "Failed to extract commit version: #{inspect(reason)}"
     end
   end
 
