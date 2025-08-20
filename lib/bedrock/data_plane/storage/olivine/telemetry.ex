@@ -2,7 +2,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Telemetry do
   @moduledoc false
   alias Bedrock.Telemetry
 
-  # Fetch operations
   @spec trace_fetch_start(Bedrock.key(), Bedrock.version()) :: :ok
   def trace_fetch_start(key, version) do
     Telemetry.execute([:olivine, :fetch, :start], %{}, %{
@@ -20,7 +19,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Telemetry do
     })
   end
 
-  # Range fetch operations
   @spec trace_range_fetch_start(Bedrock.key(), Bedrock.key(), Bedrock.version()) :: :ok
   def trace_range_fetch_start(start_key, end_key, version) do
     Telemetry.execute([:olivine, :range_fetch, :start], %{}, %{
@@ -40,7 +38,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Telemetry do
     })
   end
 
-  # Transaction application
   @spec trace_transaction_applied(Bedrock.version(), non_neg_integer()) :: :ok
   def trace_transaction_applied(version, n_mutations) do
     Telemetry.execute([:olivine, :transaction, :applied], %{}, %{
@@ -49,7 +46,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Telemetry do
     })
   end
 
-  # Page operations
   @spec trace_page_split(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: :ok
   def trace_page_split(old_page_id, new_left_id, new_right_id) do
     Telemetry.execute([:olivine, :page, :split], %{}, %{
@@ -59,7 +55,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Telemetry do
     })
   end
 
-  # Error conditions
   @spec trace_persistent_error(term()) :: :ok
   def trace_persistent_error(error) do
     Telemetry.execute([:olivine, :error, :persistent], %{}, %{
@@ -67,7 +62,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Telemetry do
     })
   end
 
-  # Log pulling operations (reused from Basalt pattern)
   @spec trace_log_pull_start(Bedrock.version(), Bedrock.version()) :: :ok
   def trace_log_pull_start(timestamp_version, next_version) do
     Telemetry.execute([:olivine, :storage, :pull_start], %{}, %{

@@ -16,8 +16,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
   @type page_id :: Page.id()
   @type page :: Page.page()
 
-  # Tree Building Functions
-
   @doc """
   Builds a page tree from a page map by adding each page to an empty tree.
   """
@@ -27,8 +25,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
       add_page_to_tree(tree, page.id, page.keys)
     end)
   end
-
-  # Page Lookup Functions
 
   @doc """
   Finds the page that contains a specific key using the interval tree.
@@ -72,8 +68,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
   defp find_rightmost_node({_last_key, {page_id, _first_key}, _l, nil}), do: page_id
   defp find_rightmost_node({_last_key, {_page_id, _first_key}, _l, r}), do: find_rightmost_node(r)
 
-  # Tree Modification Functions
-
   @doc """
   Updates the interval tree by adding a new page range.
   """
@@ -112,8 +106,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
   defp first_and_last([first]), do: {first, first}
   defp first_and_last([first | rest]), do: {first, List.last(rest)}
 
-  # Range Query Functions
-
   @doc """
   Finds all pages that overlap with the given query range.
   Uses tree for initial lookup, then walks page chain for optimal performance.
@@ -132,7 +124,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
           Bedrock.key()
         ) :: Enumerable.t()
   def stream_pages_in_range(tree, page_map, query_start, query_end) do
-    # Step 1: Use tree to find first page that might contain query_start
     case page_for_key(tree, query_start) do
       nil -> []
       first_page_id -> walk_page_chain_for_overlaps(page_map, first_page_id, query_end)

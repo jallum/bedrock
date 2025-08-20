@@ -20,14 +20,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
           versions: [Bedrock.version()]
         }
 
-  # Page Creation and Management Functions
-
   @spec new(id :: id(), keys :: [binary()]) :: page()
   def new(id, keys), do: new(id, keys, Enum.map(keys, fn _ -> Version.zero() end))
 
   @spec new(id :: id(), keys :: [binary()], versions :: [Bedrock.version()]) :: page()
   def new(id, keys, versions) when length(keys) == length(versions) do
-    # Ensure all versions are binary
     if !Enum.all?(versions, &(is_binary(&1) and byte_size(&1) == 8)) do
       raise ArgumentError, "All versions must be 8-byte binary values"
     end
@@ -40,28 +37,19 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     }
   end
 
-  # Page Binary Encoding/Decoding Functions
-
   @spec to_binary(page()) :: binary()
   def to_binary(page) do
     key_count = length(page.keys)
     encoded_keys = encode_keys(page.keys)
     last_key_offset = if key_count > 0, do: 32 + key_count * 8 + byte_size(encoded_keys) - 2, else: 0
 
-    # Encode versions as 8-byte binaries (already in correct format)
     encoded_versions = for version <- page.versions, into: <<>>, do: version
 
-    # 32-byte header (all big-endian)
     header = <<
-      # 8 bytes
       page.id::unsigned-big-64,
-      # 8 bytes
       page.next_id::unsigned-big-64,
-      # 4 bytes
       key_count::unsigned-big-32,
-      # 4 bytes - byte offset to last key
       last_key_offset::unsigned-big-32,
-      # 8 bytes reserved
       0::unsigned-big-64
     >>
 
@@ -106,8 +94,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   defp decode_versions(<<>>, acc), do: {:ok, Enum.reverse(acc)}
   defp decode_versions(_, _acc), do: {:error, :invalid_versions}
 
-  # Page Inspection Functions
-
   @spec key_count(page :: page()) :: non_neg_integer()
   def key_count(page), do: length(page.keys)
 
@@ -122,19 +108,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     end
   end
 
-  # Page Modification Functions
-
   @spec add_key_to_page(page :: page(), key :: binary(), version :: Bedrock.version()) :: page()
   def add_key_to_page(page, key, version) when is_binary(version) and byte_size(version) == 8 do
-    # Insert key in sorted order to maintain page structure
     case find_insertion_point(page.keys, key) do
       {index, :duplicate} ->
-        # Update existing key with new version
         new_versions = List.replace_at(page.versions, index, version)
         %{page | versions: new_versions}
 
       {index, :new} ->
-        # Insert new key and version at the correct position
         new_keys = List.insert_at(page.keys, index, key)
         new_versions = List.insert_at(page.versions, index, version)
         %{page | keys: new_keys, versions: new_versions}
@@ -157,14 +138,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     {left_keys, right_keys} = Enum.split(keys, mid_point)
     {left_versions, right_versions} = Enum.split(versions, mid_point)
 
-    # Get next page ID from version manager - need to call the VersionManager module
-    # First update max_page_id to account for the current page if needed
     updated_vm = %{version_manager | max_page_id: max(version_manager.max_page_id, page.id)}
     {right_id, vm1} = next_id_from_vm(updated_vm)
 
-    # Reuse original page ID for left page to maintain chain integrity
     left_id = page.id
-    # vm1 already has the correct max_page_id from next_id_from_vm call
 
     left_page = new(left_id, left_keys, left_versions)
     right_page = %{new(right_id, right_keys, right_versions) | next_id: page.next_id}
@@ -175,7 +152,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
   def split_page_simple(_page, _version_manager), do: {:error, :no_split_needed}
 
-  # Helper function to get next page ID from version manager
   defp next_id_from_vm(version_manager) do
     case version_manager.free_page_ids do
       [id | rest] ->
@@ -186,8 +162,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
         {new_id, %{version_manager | max_page_id: new_id}}
     end
   end
-
-  # Page Chain Functions
 
   @doc """
   Walks the page chain starting from page 0 and returns page IDs in chain order.
@@ -205,57 +179,39 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
       []
   """
   @spec walk_page_chain(map()) :: [non_neg_integer()]
-  def walk_page_chain(page_map) when is_map(page_map) do
-    # If page map is empty or page 0 doesn't exist, return empty chain
-    if Map.has_key?(page_map, 0) do
-      walk_page_chain_from(page_map, 0, [])
-    else
-      []
-    end
-  end
+  def walk_page_chain(page_map) when is_map_key(page_map, 0), do: walk_page_chain_from(page_map, 0, [])
+  def walk_page_chain(_), do: []
 
   defp walk_page_chain_from(page_map, id, acc) do
-    # Pages must always exist in page map - crash if not found
     page = Map.fetch!(page_map, id)
 
     case page do
       %{next_id: 0} ->
-        # End of chain
         Enum.reverse([id | acc])
 
       %{next_id: next_id} ->
-        # Continue traversal
         walk_page_chain_from(page_map, next_id, [id | acc])
     end
   end
 
-  # Elegant stream that zips keys and versions from pages, then applies range constraints
   @spec stream_keys_in_range(Enumerable.t(page()), Bedrock.key(), Bedrock.key()) ::
           Enumerable.t({Bedrock.key(), Bedrock.version()})
   def stream_keys_in_range(pages_stream, start_key, end_key) do
     pages_stream
     |> Stream.flat_map(fn page ->
-      # {key, version} tuples directly
       Enum.zip(page.keys, page.versions)
     end)
     |> Stream.drop_while(fn {key, _version} -> key < start_key end)
     |> Stream.take_while(fn {key, _version} -> key < end_key end)
   end
 
-  # Page Search Functions
-
   @spec load_and_search_page_simple_with_loader(any(), id(), Bedrock.key(), map(), function()) ::
           {:ok, Bedrock.value()} | {:error, :not_found}
   def load_and_search_page_simple_with_loader(_version_manager, id, key, page_map, load_value_fn) do
-    # The page_map contains all pages from the previous version PLUS any pages
-    # modified or added by applying the transaction. All pages referenced by the
-    # tree should be in the page_map.
     page = Map.fetch!(page_map, id)
 
-    # Search page for key (simple lookup, no version comparison needed)
     case lookup_key_in_page(page, key) do
       {:ok, found_version} ->
-        # Key exists, load value using curried function
         load_value_fn.(key, found_version)
 
       {:error, :not_found} ->
@@ -271,15 +227,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
           (Bedrock.key(), Bedrock.version() -> {:ok, Bedrock.value()} | {:error, :not_found})
         ) :: [{Bedrock.key(), Bedrock.value()}]
   def load_and_search_page_range_simple_with_loader(id, start_key, end_key, page_map, load_value_fn) do
-    # Legacy function maintained for compatibility
-    # The optimized version now uses stream_page_keys_in_range
     page = Map.fetch!(page_map, id)
 
-    # Search page for all keys in range (simple enumeration, no version comparison needed)
     keys_in_range =
       Enum.filter(page.keys, fn key -> key >= start_key and key <= end_key end)
 
-    # Load values for all found keys
     loaded_results =
       Enum.reduce(keys_in_range, [], fn key, acc ->
         case load_key_value_pair(page, key, load_value_fn) do
@@ -291,7 +243,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     Enum.reverse(loaded_results)
   end
 
-  # Helper function to load a key-value pair with reduced nesting
   defp load_key_value_pair(page, key, load_value_fn) do
     case lookup_key_in_page(page, key) do
       {:ok, found_version} ->
@@ -308,8 +259,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
       {:error, :not_found} -> nil
     end
   end
-
-  # Page Persistence Functions
 
   @spec persist_page_to_database(any(), Database.t(), page :: page()) ::
           :ok | {:error, term()}

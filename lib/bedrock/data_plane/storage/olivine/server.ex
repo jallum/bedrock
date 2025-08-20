@@ -29,10 +29,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   end
 
   @impl true
-  # We use a continuation here to ensure that the foreman isn't blocked
-  # waiting for the worker to finish it's startup sequence (which could take
-  # a few seconds or longer if the database is large.) The foreman will
-  # be notified when the worker is ready to accept requests.
   def init(args), do: {:ok, args, {:continue, :finish_startup}}
 
   @impl true
@@ -43,8 +39,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
 
   @impl true
   def terminate(_reason, _state) do
-    # Handle termination when server hasn't fully initialized yet
-    # or is in any other state (e.g., during startup)
     :ok
   end
 
@@ -115,13 +109,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
 
   @impl true
   def handle_info(_msg, %State{} = t) do
-    # Ignore unknown messages to prevent crashes
     noreply(t)
   end
 
   @impl true
   def handle_info(_msg, state) do
-    # Handle messages when state is not fully initialized
     {:noreply, state}
   end
 end

@@ -19,7 +19,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   def startup(otp_name, foreman, id, path) do
     with :ok <- ensure_directory_exists(path),
          {:ok, database} <- Database.open(:"#{otp_name}_db", Path.join(path, "dets")) do
-      # Perform recovery from persistent storage
       version_manager = VersionManager.recover_from_database(database)
 
       {:ok,
@@ -59,12 +58,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   def stop_pulling(%{pull_task: nil} = t), do: t
 
   def stop_pulling(%{pull_task: _puller} = t) do
-    # Future implementation will gracefully stop the pulling task here.
-    # This includes:
-    # - Stopping the data stream from log shards
-    # - Completing any in-flight transaction applications
-    # - Cleaning up connection resources
-    # For now, we just reset the puller reference.
     reset_puller(t)
   end
 
@@ -78,13 +71,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
         send(self(), {:transactions_applied, version})
         version
       end
-
-      # Future implementation will create a data pulling task here that syncs with the log.
-      # The pulling mechanism will be responsible for:
-      # - Connecting to the distributed log shards
-      # - Streaming transaction data from the configured starting position
-      # - Applying received transactions via the apply_and_notify callback
-      # For now, we just transition to running mode without active pulling.
 
       t
       |> update_mode(:running)
@@ -106,7 +92,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
     durable_version = VersionManager.last_durable_version(t.version_manager)
 
     cond do
-      # Check if version is too new - waitlist immediately
       current_version < version ->
         fetch_data = {key, version}
         reply_fn = fn result -> GenServer.reply(from, result) end
@@ -123,11 +108,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
 
         {:waitlist, %{t | waiting_fetches: new_waiting}}
 
-      # Check if version is too old - return error immediately
       version < durable_version ->
         {:error, :version_too_old, t}
 
-      # Version is in valid range - do the actual lookup
       true ->
         case VersionManager.fetch(t.version_manager, key, version, t.database) do
           {:ok, value} ->
@@ -151,7 +134,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
     durable_version = VersionManager.last_durable_version(t.version_manager)
 
     cond do
-      # Check if version is too new - waitlist immediately
       current_version < version ->
         range_fetch_data = {start_key, end_key, version}
         reply_fn = fn result -> GenServer.reply(from, result) end
@@ -168,11 +150,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
 
         {:waitlist, %{t | waiting_fetches: new_waiting}}
 
-      # Check if version is too old - return error immediately
       version < durable_version ->
         {:error, :version_too_old, t}
 
-      # Version is in valid range - do the actual lookup
       true ->
         case VersionManager.range_fetch(t.version_manager, start_key, end_key, version, t.database) do
           {:ok, results} ->
@@ -182,7 +162,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
             {:error, :version_too_old, t}
 
           {:error, :not_found} ->
-            # Empty range returns empty list, not error
             {:ok, [], t}
         end
     end
@@ -219,7 +198,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   defp handle_range_fetch(t, start_key, end_key, version, reply_fn) do
     case VersionManager.range_fetch(t.version_manager, start_key, end_key, version, t.database) do
       {:ok, results} -> reply_fn.({:ok, results})
-      # Empty range
       {:error, :not_found} -> reply_fn.({:ok, []})
       error -> reply_fn.(error)
     end

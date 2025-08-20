@@ -8,7 +8,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
             window_size_in_microseconds: pos_integer()
           }
   defstruct dets_storage: nil,
-            # 5000ms * 1000
             window_size_in_microseconds: 5_000_000
 
   @spec open(otp_name :: atom(), file_path :: String.t()) ::
@@ -38,7 +37,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
 
   @spec close(database :: t()) :: :ok
   def close(database) do
-    # Simply try to close, ignore any errors
     try do
       :dets.sync(database.dets_storage)
     catch
@@ -96,7 +94,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
           [page_id | acc]
 
         {key, _value}, acc when is_binary(key) ->
-          # Skip value entries
           acc
       end,
       [],
@@ -125,11 +122,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
           durable_version :: Bedrock.version()
         ) :: :ok | {:error, term()}
   def batch_persist_all(database, pages, values, durable_version) do
-    # Combine all DETS entries into a single transaction:
-    # - Pages: {page_id, page_binary}
-    # - Values: {key, value}
-    # - Durable version: {:durable_version, version}
-
     page_entries = Enum.map(pages, fn {page_id, page_binary} -> {page_id, page_binary} end)
     value_entries = Enum.map(values, fn {key, value} -> {key, value} end)
     version_entry = {:durable_version, durable_version}
@@ -194,7 +186,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   end
 
   defp calculate_utilization_ratio(objects, dets_storage) do
-    # Simple utilization estimate
     file_size = :dets.info(dets_storage, :file_size) || 1
     min(1.0, objects / max(1, file_size / 1000))
   end
@@ -204,7 +195,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
     :dets.sync(database.dets_storage)
     :ok
   catch
-    # Handle any sync errors gracefully
     _, _ -> :ok
   end
 end
