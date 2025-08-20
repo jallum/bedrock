@@ -54,8 +54,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     Transaction.encode(transaction_map)
   end
 
-  @tmp_dir "/tmp/olivine_version_manager_test"
-
   describe "basic functionality" do
     test "new/0 creates a new version manager" do
       vm = VersionManager.new()
@@ -366,15 +364,19 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   end
 
   describe "recovery and persistence" do
-    setup do
-      File.rm_rf(@tmp_dir)
-      File.mkdir_p!(@tmp_dir)
+    @tag :tmp_dir
+    setup context do
+      tmp_dir =
+        context[:tmp_dir] || Path.join(System.tmp_dir!(), "olivine_recovery_test_#{System.unique_integer([:positive])}")
+
+      File.rm_rf(tmp_dir)
+      File.mkdir_p!(tmp_dir)
 
       on_exit(fn ->
-        File.rm_rf(@tmp_dir)
+        File.rm_rf(tmp_dir)
       end)
 
-      {:ok, tmp_dir: @tmp_dir}
+      {:ok, tmp_dir: tmp_dir}
     end
 
     test "recover_from_database/1 handles empty database", %{tmp_dir: tmp_dir} do
@@ -794,14 +796,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
   describe "integration with database persistence" do
     setup do
-      File.rm_rf(@tmp_dir)
-      File.mkdir_p!(@tmp_dir)
+      tmp_dir = System.tmp_dir!()
+      test_dir = Path.join(tmp_dir, "olivine_integration_test_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(test_dir)
 
       on_exit(fn ->
-        File.rm_rf(@tmp_dir)
+        File.rm_rf!(test_dir)
       end)
 
-      {:ok, tmp_dir: @tmp_dir}
+      {:ok, tmp_dir: test_dir}
     end
 
     test "page splitting with persistence maintains chain integrity", %{tmp_dir: tmp_dir} do
@@ -2407,8 +2410,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   describe "refactored fetch functions - value resolution separation" do
     setup do
       vm = VersionManager.new()
-      File.mkdir_p!(@tmp_dir)
-      file_path = Path.join(@tmp_dir, "fetch_test_#{System.unique_integer([:positive])}.dets")
+      tmp_dir = System.tmp_dir!()
+      test_dir = Path.join(tmp_dir, "olivine_test_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(test_dir)
+      file_path = Path.join(test_dir, "fetch_test.dets")
       {:ok, database} = Database.open(:fetch_test, file_path)
 
       # Create a test version higher than durable version for ETS testing
@@ -2429,7 +2434,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       # Store durable values in database
       :ok = Database.store_value(database, "key1", "durable_value1")
 
-      on_exit(fn -> Database.close(database) end)
+      on_exit(fn ->
+        Database.close(database)
+        File.rm_rf!(test_dir)
+      end)
 
       %{
         vm: vm3,
