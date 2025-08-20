@@ -15,11 +15,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.ServerTest do
     test "basic DETS operations work" do
       temp_path = "/tmp/test_olivine_#{System.unique_integer([:positive])}.dets"
 
-      # Test opening and closing DETS
       assert {:ok, db} = Database.open(:test_olivine, temp_path)
       assert :ok = Database.close(db)
 
-      # Cleanup
       File.rm(temp_path)
     end
 
@@ -33,7 +31,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.ServerTest do
     test "basic telemetry events can be emitted" do
       alias Bedrock.DataPlane.Storage.Olivine.Telemetry
 
-      # These should not crash
       assert :ok = Telemetry.trace_fetch_start("test_key", <<1::64>>)
       assert :ok = Telemetry.trace_transaction_applied(<<1::64>>, 1)
       assert :ok = Telemetry.trace_persistent_error(:test_error)

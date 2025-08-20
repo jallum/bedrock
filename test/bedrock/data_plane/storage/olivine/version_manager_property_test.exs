@@ -155,21 +155,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
             end
           end)
 
-        # Extract all (last_key, {page_id, first_key}) pairs from tree
         tree_entries = extract_tree_entries(tree)
 
-        # Verify tree maintains search property - all keys should be retrievable
-        # Note: GB-tree doesn't guarantee traversal order, only search efficiency
         last_keys = Enum.map(tree_entries, fn {last_key, _} -> last_key end)
         assert length(last_keys) == length(Enum.uniq(last_keys)), "All tree keys should be unique"
 
-        # Verify each page's range is valid (first_key <= last_key)
         Enum.each(tree_entries, fn {last_key, {_page_id, first_key}} ->
           assert first_key <= last_key, "Page range should be valid: first_key <= last_key"
         end)
 
-        # Verify tree search functionality works correctly
-        # For each page, all keys in that page should map back to that page
         Enum.each(pages, fn page ->
           Enum.each(page.keys, fn key ->
             found_page_id = Tree.page_for_key(tree, key)
@@ -188,7 +182,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
             Tree.add_page_to_tree(tree_acc, page.id, page.keys)
           end)
 
-        # Test that each key in each page can be found
         Enum.each(pages, fn page ->
           Enum.each(page.keys, fn key ->
             found_page_id = Tree.page_for_key(tree, key)
@@ -216,7 +209,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
         assert is_integer(found_page_id), "page_for_insertion should always return a page_id"
         assert found_page_id >= 0, "page_id should be non-negative"
 
-        # The returned page should exist in our original pages
         page_ids = Enum.map(pages, & &1.id)
         assert found_page_id in page_ids, "Returned page_id should exist in the tree"
       end
@@ -234,7 +226,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
         rightmost_page_id = Tree.find_rightmost_page(tree)
         assert is_integer(rightmost_page_id), "find_rightmost_page should return a page_id"
 
-        # Find the expected rightmost page (highest last_key)
         expected_page = Enum.max_by(pages, &List.last(&1.keys))
 
         assert rightmost_page_id == expected_page.id,
@@ -254,18 +245,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
       if length(page.keys) > 0 do
         updated_page = Page.add_key_to_page(page, new_key, new_version)
 
-        # Keys should remain sorted
         assert updated_page.keys == Enum.sort(updated_page.keys),
                "Keys should remain sorted after insertion"
 
-        # Should have same number of keys and versions
         assert length(updated_page.keys) == length(updated_page.versions),
                "Number of keys and versions should match"
 
-        # New key should be present
         assert new_key in updated_page.keys, "New key should be present in the page"
 
-        # If key was already present, page size shouldn't change
         if new_key in page.keys do
           assert length(updated_page.keys) == length(page.keys),
                  "Page size shouldn't change when updating existing key"
@@ -285,14 +272,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
       if length(page.keys) > 0 do
         tree = Tree.add_page_to_tree(:gb_trees.empty(), page.id, page.keys)
 
-        # Update the tree with new keys
         updated_tree = Tree.update_page_in_tree(tree, page.id, page.keys, new_keys)
 
-        # Verify tree is still valid
         tree_entries = extract_tree_entries(updated_tree)
 
         if length(tree_entries) > 0 do
-          # Tree should contain the new range
           {last_key, {found_page_id, first_key}} = List.first(tree_entries)
           assert found_page_id == page.id, "Page ID should be preserved"
           assert first_key == List.first(new_keys), "First key should be updated"
@@ -305,13 +289,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
   # Page Splitting Properties
 
   property "page splitting creates valid pages" do
-    # Create an oversized page to test splitting
     check all(base_keys <- list_of(binary_key_generator(), min_length: 10, max_length: 50)) do
-      # Create enough keys to trigger splitting (>256)
       additional_keys = for i <- 1..260, do: "split_key_#{String.pad_leading("#{i}", 4, "0")}"
       all_keys = (base_keys ++ additional_keys) |> Enum.sort() |> Enum.dedup()
 
-      # Ensure we have enough keys
       if length(all_keys) > 256 do
         versions = Enum.map(all_keys, fn _ -> Version.from_integer(1) end)
         vm = VersionManager.new()
@@ -319,27 +300,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
 
         case Page.split_page_simple(oversized_page, vm) do
           {{left_page, right_page}, _updated_vm} ->
-            # Both pages should be valid
             assert length(left_page.keys) > 0, "Left page should have keys"
             assert length(right_page.keys) > 0, "Right page should have keys"
             assert length(left_page.keys) <= 256, "Left page should not exceed max size"
             assert length(right_page.keys) <= 256, "Right page should not exceed max size"
 
-            # Keys should be sorted within each page
             assert left_page.keys == Enum.sort(left_page.keys), "Left page keys should be sorted"
             assert right_page.keys == Enum.sort(right_page.keys), "Right page keys should be sorted"
 
-            # All original keys should be preserved across both pages
             all_new_keys = left_page.keys ++ right_page.keys
             assert Enum.sort(all_new_keys) == Enum.sort(all_keys), "All keys should be preserved"
 
-            # Left page keys should all be < right page keys
             left_max = List.last(left_page.keys)
             right_min = List.first(right_page.keys)
             assert left_max < right_min, "Left page max should be < right page min"
 
           {:error, :no_split_needed} ->
-            # This is fine - the page might not need splitting
             :ok
         end
       end
@@ -352,13 +328,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
     check all(test_key <- binary_key_generator()) do
       empty_tree = :gb_trees.empty()
 
-      # Empty tree should return nil for page_for_key
       assert Tree.page_for_key(empty_tree, test_key) == nil
 
-      # Empty tree should return page 0 for page_for_insertion
       assert Tree.page_for_insertion(empty_tree, test_key) == 0
 
-      # Empty tree should return nil for find_rightmost_page
       assert Tree.find_rightmost_page(empty_tree) == nil
     end
   end
@@ -371,10 +344,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
       if length(page.keys) > 0 do
         tree = Tree.add_page_to_tree(:gb_trees.empty(), page.id, page.keys)
 
-        # Single page tree should return that page for rightmost
         assert Tree.find_rightmost_page(tree) == page.id
 
-        # page_for_insertion should return the page for any key
         found_page_id = Tree.page_for_insertion(tree, test_key)
         assert found_page_id == page.id
       end

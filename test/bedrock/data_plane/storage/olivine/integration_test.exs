@@ -33,17 +33,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
   describe "End-to-End Transaction Processing Workflow" do
     @tag :tmp_dir
     test "complete transaction processing pipeline from start to finish", %{tmp_dir: tmp_dir} do
-      # 1. Start Olivine server
       {:ok, state} = Logic.startup(:test_e2e, self(), random_id(), tmp_dir)
 
-      # Verify initial state
       assert state.version_manager.current_version == Version.zero()
       assert state.version_manager.durable_version == Version.zero()
 
-      # 2. Apply transactions with writes using real transaction format
       v1 = Version.from_integer(1)
 
-      # Transaction 1: Initial data
       transaction1 =
         TransactionTestSupport.new_log_transaction(v1, %{
           "user:alice" => "alice_data",
@@ -52,7 +48,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "config:retries" => "3"
         })
 
-      # Apply transaction and verify version advancement
       updated_vm1 =
         VersionManager.apply_transactions(
           state.version_manager,
@@ -60,15 +55,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
         )
 
       applied_version1 = updated_vm1.current_version
-      # Note: applied_version1 will be a system-generated timestamp, not v1
       assert is_binary(applied_version1)
       assert byte_size(applied_version1) == 8
 
-      # 3. Verify transaction was processed (basic integration test)
       _updated_state1 = %{state | version_manager: updated_vm1}
       assert updated_vm1.current_version != Version.zero()
 
-      # 4. Apply more transactions to test system handles multiple operations
       v2 = Version.from_integer(2)
 
       transaction2 =
@@ -85,35 +77,24 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
 
       applied_version2 = updated_vm2.current_version
       assert is_binary(applied_version2)
-      # Versions should be unique (though they may be very close in time)
-      # For MVP, we just ensure they're both valid versions
       assert is_binary(applied_version2)
 
-      # 5. Verify persistence capabilities
-      # Create and persist test data to verify DETS integration
       test_page = Page.new(1, ["test:persist"], [applied_version1])
       :ok = Page.persist_page_to_database(updated_vm2, state.database, test_page)
 
       test_values = [{"test:persist", applied_version1, "persisted_value"}]
       :ok = VersionManager.persist_values_to_database(updated_vm2, state.database, test_values)
 
-      # 6. Restart and verify recovery
       Logic.shutdown(%{state | version_manager: updated_vm2})
 
-      # Start new instance to test recovery
       {:ok, recovered_state} = Logic.startup(:test_recovery, self(), random_id(), tmp_dir)
 
-      # Verify recovery worked - database should be accessible
-      # Note: max_page_id should be 0 since page 0 was created by transactions
-      # Page 1 was manually persisted but not connected to the page chain
       assert recovered_state.version_manager.max_page_id == 0
 
-      # Load value without version since DETS stores version-less
       {:ok, recovered_data} = Database.load_value(recovered_state.database, "test:persist")
 
       assert recovered_data == "persisted_value"
 
-      # 7. Verify system is functional after recovery
       assert recovered_state.database
       assert recovered_state.version_manager
 
@@ -124,12 +105,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
     test "complex mutation scenarios with overlapping ranges and versions", %{tmp_dir: tmp_dir} do
       {:ok, state} = Logic.startup(:test_complex, self(), random_id(), tmp_dir)
 
-      # Create a complex sequence of overlapping mutations
       v1 = Version.from_integer(100)
       v2 = Version.from_integer(200)
       v3 = Version.from_integer(300)
 
-      # Transaction 1: Create base data
       tx1 =
         TransactionTestSupport.new_log_transaction(v1, %{
           "a:key1" => "value1",
@@ -142,41 +121,30 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
       _state1 = %{state | version_manager: vm1}
 
-      # Transaction 2: Partial updates and new keys
       tx2 =
         TransactionTestSupport.new_log_transaction(v2, %{
-          # Update
           "a:key1" => "updated_value1",
-          # New
           "a:key3" => "value3",
-          # New namespace
           "d:key1" => "valueD1"
         })
 
       vm2 = VersionManager.apply_transactions(vm1, [tx2])
       _state2 = %{state | version_manager: vm2}
 
-      # Transaction 3: Range clear with overlapping data
       tx3 = create_range_clear_transaction(v3, "a:", "b:")
 
       vm3 = VersionManager.apply_transactions(vm2, [tx3])
       state3 = %{state | version_manager: vm3}
 
-      # Verify system processes complex mutations without crashing
-      # MVP may not support full MVCC semantics, so we focus on integration
-
-      # Test that transactions were applied (system should be stable)
       assert vm3.current_version != Version.zero()
       assert state3.database
       assert state3.version_manager
 
-      # Test some basic fetch operations work (exact results may vary)
       test_keys = ["a:key1", "b:key1", "c:key1", "d:key1"]
 
       Enum.each(test_keys, fn key ->
         case Logic.fetch(state3, key, vm3.current_version) do
           {:ok, value} -> assert is_binary(value)
-          # MVP limitations acceptable
           {:error, _} -> :ok
         end
       end)
@@ -188,7 +156,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
     test "transaction processing with large datasets", %{tmp_dir: tmp_dir} do
       {:ok, state} = Logic.startup(:test_large, self(), random_id(), tmp_dir)
 
-      # Create transaction with many keys to test page splitting
       large_data =
         for i <- 1..500 do
           {"large_key_#{String.pad_leading("#{i}", 4, "0")}", "large_value_#{i}"}
@@ -209,16 +176,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
 
       updated_state = %{state | version_manager: updated_vm}
 
-      # Spot check that system can handle large datasets (integration focus)
-      # MVP may not support full MVCC lookup, so we focus on system stability
       case Logic.fetch(updated_state, "large_key_0001", applied_version) do
         {:ok, value} -> assert String.contains?(value, "large_value")
-        # MVP limitations acceptable
         {:error, _} -> :ok
       end
 
-      # Test that system handles large datasets without crashing
-      # (Performance and exact lookup behavior is secondary for MVP)
       assert Process.alive?(self())
       assert updated_state.version_manager
       assert updated_state.database

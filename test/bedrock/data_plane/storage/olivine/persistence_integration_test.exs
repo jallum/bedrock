@@ -15,7 +15,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
   @tmp_dir "/tmp/olivine_integration_test"
 
   setup do
-    # Ensure clean state for each test
     File.rm_rf(@tmp_dir)
     File.mkdir_p!(@tmp_dir)
 
@@ -30,14 +29,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
     test "server startup with empty database initializes correctly", %{tmp_dir: tmp_dir} do
       {:ok, state} = Logic.startup(:test_startup, self(), :test_id, tmp_dir)
 
-      # Verify state is properly initialized
       assert state.otp_name == :test_startup
       assert state.id == :test_id
       assert state.path == tmp_dir
       assert state.database
       assert state.version_manager
 
-      # Verify version manager started with correct initial state
       vm = state.version_manager
       assert vm.max_page_id == 0
       assert vm.free_page_ids == []
@@ -48,10 +45,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
     end
 
     test "server startup with existing data performs recovery", %{tmp_dir: tmp_dir} do
-      # First session: create some persistent data
       {:ok, db1} = Database.open(:session1, Path.join(tmp_dir, "dets"))
 
-      # Create a page chain: 0 -> 2 -> 5
       page0 = Page.new(0, [<<"start">>], int_versions_to_binary([10]))
       page0 = %{page0 | next_id: 2}
 
@@ -61,12 +56,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       page5 = Page.new(5, [<<"end">>], int_versions_to_binary([30]))
       page5 = %{page5 | next_id: 0}
 
-      # Store pages and values
       :ok = Database.store_page(db1, 0, Page.to_binary(page0))
       :ok = Database.store_page(db1, 2, Page.to_binary(page2))
       :ok = Database.store_page(db1, 5, Page.to_binary(page5))
 
-      # Store values using 2-tuple format (key, value) - versions not stored in DETS
       values = [
         {<<"key1">>, <<"value1">>},
         {<<"key2">>, <<"value2">>},
@@ -77,16 +70,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       Database.close(db1)
 
-      # Second session: startup with recovery
       {:ok, state} = Logic.startup(:test_recovery, self(), :test_id, tmp_dir)
 
-      # Verify recovery rebuilt correct structure
       vm = state.version_manager
       assert vm.max_page_id == 5
-      # Free pages: 1, 3, 4 (gaps in 0,2,5 sequence)
       assert Enum.sort(vm.free_page_ids) == [1, 3, 4]
 
-      # Verify values are accessible through database (without version since DETS stores version-less)
       {:ok, val1} = Database.load_value(state.database, <<"key1">>)
       assert val1 == <<"value1">>
 
@@ -105,40 +94,32 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       vm = state.version_manager
       db = state.database
 
-      # Simulate window data (in real system this would come from transaction processing)
       window_data = %{test: "data"}
 
       {:ok, updated_vm} = VersionManager.advance_window_with_persistence(vm, db, window_data)
 
-      # For Phase 1.3, should complete successfully
       assert updated_vm
 
-      # Verify database sync occurred (data is durable)
       assert :ok = Database.sync(db)
 
       Logic.shutdown(%{state | version_manager: updated_vm})
     end
 
     test "corrupted page handling during recovery", %{tmp_dir: tmp_dir} do
-      # Create database with mix of good and corrupted pages
       table_name = String.to_atom("corrupt_test_#{System.unique_integer([:positive])}")
       {:ok, db1} = Database.open(table_name, Path.join(tmp_dir, "dets"))
 
-      # Store valid page 0
       page0 = Page.new(0, [<<"valid">>], int_versions_to_binary([100]))
       page0 = %{page0 | next_id: 1}
       :ok = Database.store_page(db1, 0, Page.to_binary(page0))
 
-      # Store corrupted page 1
       :ok = Database.store_page(db1, 1, <<"definitely_not_a_valid_page">>)
 
-      # Store valid page 3 (not in chain, but exists)
       page3 = Page.new(3, [<<"isolated">>], int_versions_to_binary([300]))
       :ok = Database.store_page(db1, 3, Page.to_binary(page3))
 
       Database.close(db1)
 
-      # Recovery should fail fast on corrupted pages instead of handling them gracefully
       assert_raise RuntimeError,
                    "Database recovery failed: corrupted page detected. Database integrity is compromised.",
                    fn ->
@@ -147,10 +128,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
     end
 
     test "large dataset recovery performance", %{tmp_dir: tmp_dir} do
-      # Create database with many pages to test recovery performance
       {:ok, db1} = Database.open(:large_test, Path.join(tmp_dir, "dets"))
 
-      # Create chain of 50 pages: 0 -> 1 -> 2 -> ... -> 49
       pages =
         for i <- 0..49 do
           next_id = if i == 49, do: 0, else: i + 1
@@ -158,13 +137,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
           %{page | next_id: next_id}
         end
 
-      # Store all pages
       Enum.each(pages, fn page ->
         page_binary = Page.to_binary(page)
         :ok = Database.store_page(db1, page.id, page_binary)
       end)
 
-      # Store many values using 2-tuple format (key, value) - versions not stored in DETS
       values =
         for i <- 1..1000 do
           {<<"bulk_key_#{i}">>, <<"bulk_value_#{i}">>}
@@ -174,22 +151,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       Database.close(db1)
 
-      # Time the recovery process
       start_time = System.monotonic_time(:millisecond)
       {:ok, state} = Logic.startup(:large_recovery, self(), :test_id, tmp_dir)
       end_time = System.monotonic_time(:millisecond)
 
       recovery_time = end_time - start_time
-      # Recovery should complete in reasonable time (< 1 second for this dataset)
       assert recovery_time < 1000
 
-      # Verify recovery completed correctly
       vm = state.version_manager
       assert vm.max_page_id == 49
-      # No gaps in 0..49 sequence
       assert vm.free_page_ids == []
 
-      # Spot check a few values (without version since DETS stores version-less)
       {:ok, val1} = Database.load_value(state.database, <<"bulk_key_1">>)
       assert val1 == <<"bulk_value_1">>
 
@@ -200,7 +172,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
     end
 
     test "multiple startup/shutdown cycles maintain data integrity", %{tmp_dir: tmp_dir} do
-      # Cycle 1: Create initial data
       {:ok, state1} = Logic.startup(:cycle1, self(), :test_id, tmp_dir)
 
       page = Page.new(1, [<<"cycle1">>], int_versions_to_binary([100]))
@@ -211,10 +182,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       Logic.shutdown(state1)
 
-      # Cycle 2: Modify data
       {:ok, state2} = Logic.startup(:cycle2, self(), :test_id, tmp_dir)
 
-      # Add another page
       page2 = Page.new(2, [<<"cycle2">>], int_versions_to_binary([200]))
       :ok = Page.persist_page_to_database(state2.version_manager, state2.database, page2)
 
@@ -223,14 +192,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       Logic.shutdown(state2)
 
-      # Cycle 3: Verify all data persisted
       {:ok, state3} = Logic.startup(:cycle3, self(), :test_id, tmp_dir)
 
       vm = state3.version_manager
-      # Note: max_page_id should be 0 since manually persisted pages are not in the valid chain
       assert vm.max_page_id == 0
 
-      # Verify pages exist
       {:ok, page1_data} = Database.load_page(state3.database, 1)
       {:ok, decoded1} = Page.from_binary(page1_data)
       assert decoded1.keys == [<<"cycle1">>]
@@ -239,9 +205,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       {:ok, decoded2} = Page.from_binary(page2_data)
       assert decoded2.keys == [<<"cycle2">>]
 
-      # Verify values from both cycles (DETS uses last-write-wins, so only latest value)
       {:ok, val2} = Database.load_value(state3.database, <<"cycle_key">>)
-      # Last write wins
       assert val2 == <<"cycle_value_2">>
 
       Logic.shutdown(state3)

@@ -6,7 +6,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   @tmp_dir "/tmp/olivine_database_test"
 
   setup do
-    # Ensure clean state for each test
     File.rm_rf(@tmp_dir)
     File.mkdir_p!(@tmp_dir)
 
@@ -52,14 +51,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
     test "database persists data across open/close cycles", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "persist_test.dets")
 
-      # First session: store data
       table1 = String.to_atom("persist_test1_#{System.unique_integer([:positive])}")
       {:ok, db1} = Database.open(table1, file_path)
       :ok = Database.store_page(db1, 42, <<"test_page_data">>)
       :ok = Database.store_value(db1, <<"key1">>, <<"value1">>)
       Database.close(db1)
 
-      # Second session: verify data persists
       table2 = String.to_atom("persist_test2_#{System.unique_integer([:positive])}")
       {:ok, db2} = Database.open(table2, file_path)
 
@@ -75,7 +72,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
 
   describe "page operations" do
     setup %{tmp_dir: tmp_dir} do
-      # Use unique table name for each test
       table_name = String.to_atom("pages_test_#{System.unique_integer([:positive])}_#{:erlang.system_time()}")
       file_path = Path.join(tmp_dir, "pages_#{table_name}.dets")
       {:ok, db} = Database.open(table_name, file_path)
@@ -107,12 +103,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
     end
 
     test "get_all_page_ids/1 returns all stored page IDs", %{db: db} do
-      # Store some pages
       :ok = Database.store_page(db, 1, <<"page1">>)
       :ok = Database.store_page(db, 5, <<"page5">>)
       :ok = Database.store_page(db, 3, <<"page3">>)
 
-      # Store some values (should not appear in page IDs)
       :ok = Database.store_value(db, <<"key1">>, <<"value1">>)
 
       page_ids = Database.get_all_page_ids(db)
@@ -122,7 +116,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
 
   describe "value operations" do
     setup %{tmp_dir: tmp_dir} do
-      # Use unique table name for each test
       table_name = String.to_atom("values_test_#{System.unique_integer([:positive])}_#{:erlang.system_time()}")
       file_path = Path.join(tmp_dir, "values_#{table_name}.dets")
       {:ok, db} = Database.open(table_name, file_path)
@@ -147,16 +140,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
     end
 
     test "store_value/3 handles last-write-wins behavior", %{db: db} do
-      # Store initial value
       :ok = Database.store_value(db, <<"key1">>, <<"initial_value">>)
 
-      # Overwrite with new value (last-write-wins)
       :ok = Database.store_value(db, <<"key1">>, <<"updated_value">>)
 
-      # Different key
       :ok = Database.store_value(db, <<"key2">>, <<"different_key">>)
 
-      # Verify last value wins
       {:ok, val1} = Database.load_value(db, <<"key1">>)
       assert val1 == <<"updated_value">>
 
@@ -173,7 +162,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
 
       :ok = Database.batch_store_values(db, values)
 
-      # Verify all values were stored
       {:ok, val1} = Database.load_value(db, <<"key1">>)
       assert val1 == <<"value1">>
 
@@ -187,7 +175,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
 
   describe "database info and statistics" do
     setup %{tmp_dir: tmp_dir} do
-      # Use unique table name for each test
       table_name = String.to_atom("info_test_#{System.unique_integer([:positive])}_#{:erlang.system_time()}")
       file_path = Path.join(tmp_dir, "info_#{table_name}.dets")
       {:ok, db} = Database.open(table_name, file_path)
@@ -198,17 +185,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
     end
 
     test "info/2 returns database statistics", %{db: db} do
-      # Empty database
       assert Database.info(db, :n_keys) == 0
       assert Database.info(db, :size_in_bytes) >= 0
       assert Database.info(db, :utilization) >= 0.0
       assert Database.info(db, :key_ranges) == []
 
-      # Add some data
       :ok = Database.store_page(db, 1, <<"page_data">>)
       :ok = Database.store_value(db, <<"key1">>, <<"value1">>)
 
-      # Statistics should reflect added data
       assert Database.info(db, :n_keys) > 0
       assert Database.info(db, :size_in_bytes) > 0
     end
@@ -225,7 +209,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
 
   describe "DETS schema verification" do
     setup %{tmp_dir: tmp_dir} do
-      # Use unique table name for each test
       table_name = String.to_atom("schema_test_#{System.unique_integer([:positive])}_#{:erlang.system_time()}")
       file_path = Path.join(tmp_dir, "schema_#{table_name}.dets")
       {:ok, db} = Database.open(table_name, file_path)
@@ -236,32 +219,25 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
     end
 
     test "natural type separation works correctly", %{db: db} do
-      # Store page (integer key)
       :ok = Database.store_page(db, 42, <<"page_data">>)
 
-      # Store value (tuple key)
       :ok = Database.store_value(db, <<"key">>, <<"value_data">>)
 
-      # Verify they don't interfere with each other
       {:ok, page_data} = Database.load_page(db, 42)
       assert page_data == <<"page_data">>
 
       {:ok, value_data} = Database.load_value(db, <<"key">>)
       assert value_data == <<"value_data">>
 
-      # Verify page IDs only include integer keys, not tuple keys
       page_ids = Database.get_all_page_ids(db)
       assert page_ids == [42]
     end
 
     test "handles edge cases in schema separation", %{db: db} do
-      # Store value with integer-like key (should still use tuple format)
       :ok = Database.store_value(db, <<42>>, <<"binary_42">>)
 
-      # Store page with ID 42 (different from the binary key above)
       :ok = Database.store_page(db, 42, <<"page_42">>)
 
-      # Both should coexist without conflict
       {:ok, value} = Database.load_value(db, <<42>>)
       assert value == <<"binary_42">>
 

@@ -113,11 +113,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
   describe "binary page encoding/decoding" do
     test "decode_keys/1 handles malformed data" do
-      # Invalid key length that exceeds remaining data
       invalid_data = <<5::integer-16-big, "abc">>
       assert {:error, :invalid_keys} = Page.decode_keys(invalid_data)
 
-      # Incomplete length prefix
       incomplete_data = <<5::8>>
       assert {:error, :invalid_keys} = Page.decode_keys(incomplete_data)
     end
@@ -145,7 +143,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
       encoded = Page.to_binary(page)
 
-      # Verify header structure (32 bytes)
       <<id::integer-64-big, next_id::integer-64-big, key_count::integer-32-big, last_key_offset::integer-32-big,
         reserved::integer-64-big, rest::binary>> = encoded
 
@@ -155,12 +152,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert last_key_offset > 0
       assert reserved == 0
 
-      # Verify versions section (2 * 8 = 16 bytes)
       <<version1::integer-64-big, version2::integer-64-big, keys_section::binary>> = rest
       assert version1 == 1000
       assert version2 == 2000
 
-      # Verify keys section
       <<key1_len::integer-16-big, "a", key2_len::integer-16-big, "bb">> = keys_section
       assert key1_len == 1
       assert key2_len == 2
@@ -176,10 +171,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     end
 
     test "from_binary/1 handles malformed page data" do
-      # Too short header
       assert {:error, :invalid_page} = Page.from_binary(<<1::32>>)
 
-      # Header with invalid version data
       invalid_header = <<1::64, 0::64, 1::32, 0::32, 0::64>>
       invalid_data = <<invalid_header::binary, "incomplete">>
       assert {:error, :invalid_page} = Page.from_binary(invalid_data)
@@ -211,17 +204,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     test "add_key_to_page/3 inserts new keys in sorted order" do
       page = Page.new(1, [<<"apple">>, <<"cherry">>], int_versions_to_binary([100, 300]))
 
-      # Insert in the middle
       updated_page = Page.add_key_to_page(page, <<"banana">>, Version.from_integer(200))
       assert updated_page.keys == [<<"apple">>, <<"banana">>, <<"cherry">>]
       assert_versions_equal(updated_page.versions, [100, 200, 300])
 
-      # Insert at the beginning
       updated_page2 = Page.add_key_to_page(page, <<"aardvark">>, Version.from_integer(50))
       assert updated_page2.keys == [<<"aardvark">>, <<"apple">>, <<"cherry">>]
       assert_versions_equal(updated_page2.versions, [50, 100, 300])
 
-      # Insert at the end
       updated_page3 = Page.add_key_to_page(page, <<"zebra">>, Version.from_integer(400))
       assert updated_page3.keys == [<<"apple">>, <<"cherry">>, <<"zebra">>]
       assert_versions_equal(updated_page3.versions, [100, 300, 400])
@@ -238,7 +228,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     test "add_key_to_page/3 maintains sorted order invariant" do
       page = Page.new(1, [], [])
 
-      # Add keys in random order, should maintain sorted order
       keys_to_add = [<<"zebra">>, <<"apple">>, <<"mango">>, <<"banana">>]
       versions = [400, 100, 300, 200]
 
@@ -256,7 +245,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
   describe "page splitting" do
     test "split_page_simple/2 does not split pages under threshold" do
-      # Create page with exactly 256 keys (threshold)
       keys = for i <- 1..256, do: <<"key_#{String.pad_leading(to_string(i), 3, "0")}">>
       versions = Enum.map(1..256, & &1)
       page = Page.new(1, keys, int_versions_to_binary(versions))
@@ -266,37 +254,28 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     end
 
     test "split_page_simple/2 splits pages over threshold" do
-      # Create page with 300 keys (over 256 threshold)
       keys = for i <- 1..300, do: <<"key_#{String.pad_leading(to_string(i), 3, "0")}">>
       versions = Enum.map(1..300, & &1)
       page = Page.new(1, keys, int_versions_to_binary(versions))
-      # Set next page ID
       page = %{page | next_id: 99}
       vm = VersionManager.new()
 
       {{left_page, right_page}, updated_vm} = Page.split_page_simple(page, vm)
 
-      # Verify keys are properly distributed at midpoint
       expected_left_keys = Enum.take(keys, 150)
       expected_right_keys = Enum.drop(keys, 150)
       assert left_page.keys == expected_left_keys
       assert right_page.keys == expected_right_keys
 
-      # Verify versions are properly distributed at midpoint
       expected_left_versions = Enum.take(versions, 150)
       expected_right_versions = Enum.drop(versions, 150)
       assert_versions_equal(left_page.versions, expected_left_versions)
       assert_versions_equal(right_page.versions, expected_right_versions)
 
-      # Verify page linking
       assert left_page.next_id == right_page.id
-      # Original next_id preserved
       assert right_page.next_id == 99
 
-      # Verify left page reuses original ID, right page gets new ID
-      # Reused from original page
       assert left_page.id == 1
-      # Next available ID after accounting for reused page ID 1 (max becomes 1, so next is 2)
       assert right_page.id == 2
       assert updated_vm.max_page_id == 2
     end
@@ -325,11 +304,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
       {{left_page, right_page}, _updated_vm} = Page.split_page_simple(page, vm)
 
-      # Verify both pages maintain sorted order
       assert left_page.keys == Enum.sort(left_page.keys)
       assert right_page.keys == Enum.sort(right_page.keys)
 
-      # Verify split boundary: all keys in left < all keys in right
       left_max = List.last(left_page.keys)
       right_min = List.first(right_page.keys)
       assert left_max < right_min
@@ -340,26 +317,19 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       versions = Enum.map(1..300, & &1)
       page = Page.new(1, keys, int_versions_to_binary(versions))
 
-      # Start with max_page_id = 5, free_pages = [3]
       vm = %{VersionManager.new() | max_page_id: 5, free_page_ids: [3]}
 
       {{left_page, right_page}, updated_vm} = Page.split_page_simple(page, vm)
 
-      # Should reuse original page ID 1, then allocate from free list
-      # Reused from original page
       assert left_page.id == 1
-      # From free list [3]
       assert right_page.id == 3
-      # max(5, 1) = 5, unchanged
       assert updated_vm.max_page_id == 5
-      # Free list consumed
       assert updated_vm.free_page_ids == []
     end
   end
 
   describe "recovery and persistence" do
     setup do
-      # Ensure clean state for each test
       File.rm_rf(@tmp_dir)
       File.mkdir_p!(@tmp_dir)
 
@@ -389,9 +359,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       file_path = Path.join(tmp_dir, "single.dets")
       {:ok, db} = Database.open(:single_test, file_path)
 
-      # Use VersionManager functions to create realistic state
       vm_initial = VersionManager.new()
-      # Apply a simple mutation to create realistic page state
+
       vm_with_data =
         VersionManager.apply_mutations_to_version(
           [{:set, "apple", "red"}, {:set, "banana", "yellow"}],
@@ -399,23 +368,18 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
           vm_initial
         )
 
-      # Extract the page data and persist it (take latest version)
       [{_version, {_tree, page_map, _, _}} | _] = vm_with_data.versions
       assert map_size(page_map) == 1, "Should have exactly one page"
 
-      # Validate preconditions with walk_page_chain
       chain_before = Page.walk_page_chain(page_map)
       assert chain_before == [0], "Should have clean chain starting from page 0"
 
-      # Persist the page
       page_0 = Map.get(page_map, 0)
       page_binary = Page.to_binary(page_0)
       :ok = Database.store_page(db, 0, page_binary)
 
-      # Recover and verify
       vm_recovered = VersionManager.recover_from_database(db)
 
-      # With only page 0 existing and max_page_id = 0, there should be no free pages
       assert vm_recovered.max_page_id == 0
       assert vm_recovered.free_page_ids == [], "No free pages when max_page_id = 0 and only page 0 exists"
 
@@ -427,7 +391,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       file_path = Path.join(tmp_dir, "chain.dets")
       {:ok, db} = Database.open(:chain_test, file_path)
 
-      # Create a chain: 0 -> 2 -> 5 -> end
       page0 = Page.new(0, [<<"a">>], int_versions_to_binary([100]))
       page0 = %{page0 | next_id: 2}
 
@@ -435,10 +398,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       page2 = %{page2 | next_id: 5}
 
       page5 = Page.new(5, [<<"c">>], int_versions_to_binary([300]))
-      # End of chain
       page5 = %{page5 | next_id: 0}
 
-      # Store pages
       :ok = Database.store_page(db, 0, Page.to_binary(page0))
       :ok = Database.store_page(db, 2, Page.to_binary(page2))
       :ok = Database.store_page(db, 5, Page.to_binary(page5))
@@ -446,7 +407,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       vm = VersionManager.recover_from_database(db)
 
       assert vm.max_page_id == 5
-      # Free page IDs should include gaps in the sequence (1, 3, 4)
       assert Enum.sort(vm.free_page_ids) == [1, 3, 4]
 
       VersionManager.close(vm)
