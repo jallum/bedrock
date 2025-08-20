@@ -72,17 +72,19 @@ defmodule Bedrock.DataPlane.Log.Shale.Server do
   def init({cluster, otp_name, id, foreman, path, start_unlocked}) do
     initial_mode = if start_unlocked, do: :running, else: :locked
 
-    {:ok,
-     %State{
-       path: path,
-       cluster: cluster,
-       mode: initial_mode,
-       id: id,
-       otp_name: otp_name,
-       foreman: foreman,
-       oldest_version: Version.zero(),
-       last_version: Version.zero()
-     }, {:continue, :initialization}}
+    state =
+      %State{
+        path: path,
+        cluster: cluster,
+        mode: initial_mode,
+        id: id,
+        otp_name: otp_name,
+        foreman: foreman,
+        oldest_version: Version.zero(),
+        last_version: Version.zero()
+      }
+
+    {:ok, state, {:continue, :initialization}}
   end
 
   @impl true
@@ -125,12 +127,14 @@ defmodule Bedrock.DataPlane.Log.Shale.Server do
           {oldest_version, last_version, active_segment, segments}
       end
 
-    t
-    |> Map.put(:oldest_version, oldest_version)
-    |> Map.put(:last_version, last_version)
-    |> Map.put(:active_segment, active_segment)
-    |> Map.put(:segments, segments)
-    |> Map.put(:segment_recycler, pid)
+    %State{
+      t
+      | oldest_version: oldest_version,
+        last_version: last_version,
+        active_segment: active_segment,
+        segments: segments,
+        segment_recycler: pid
+    }
     |> noreply()
   end
 

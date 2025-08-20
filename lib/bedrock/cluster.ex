@@ -214,7 +214,7 @@ defmodule Bedrock.Cluster do
       """
       @impl true
       @spec fetch_gateway() :: {:ok, Gateway.ref()} | {:error, :unavailable}
-      def fetch_gateway, do: {:ok, otp_name(:gateway)}
+      def fetch_gateway, do: {:ok, @gateway_otp_name}
 
       @doc """
       Fetch the nodes that are running coordinators for the cluster.

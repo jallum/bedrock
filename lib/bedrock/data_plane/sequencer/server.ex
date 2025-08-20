@@ -27,7 +27,7 @@ defmodule Bedrock.DataPlane.Sequencer.Server do
   def child_spec(opts) do
     director = opts[:director] || raise "Missing :director option"
     epoch = opts[:epoch] || raise "Missing :epoch option"
-    otp_name = opts[:otp_name] || raise "Missing :name option"
+    otp_name = opts[:otp_name] || raise "Missing :otp_name option"
 
     known_committed_version =
       opts[:last_committed_version] || raise "Missing :last_committed_version option"

@@ -57,23 +57,25 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.Tx do
           opts :: keyword()
         ) :: {t(), [{key(), value()}], state}
         when state: term()
-  def get_range(t, s, e, read_range_fn, state, opts \\ []) do
+  def get_range(t = %{}, s, e, read_range_fn, state, opts \\ []) do
     limit = Keyword.get(opts, :limit, 1000)
 
     tx_visible =
       t.writes
-      |> Enum.filter(fn {k, v} ->
-        k >= s and k < e and v != :clear
+      |> Enum.reduce(%{}, fn {k, v}, acc ->
+        case k >= s and k < e and v != :clear do
+          true ->
+            Map.put(acc, k, v)
+
+          false ->
+            acc
+        end
       end)
-      |> Map.new()
 
     cleared_ranges =
-      t.mutations
-      |> Enum.filter(fn
-        {:clear_range, _, _} -> true
-        _ -> false
-      end)
-      |> Enum.map(fn {:clear_range, cs, ce} -> {cs, ce} end)
+      for {:clear_range, cs, ce} <- t.mutations do
+        {cs, ce}
+      end
 
     {db_results, new_state} =
       fetch_missing_data_if_needed(

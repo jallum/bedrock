@@ -94,12 +94,14 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
     ]
     defstruct [
       :transactions,
+      :indexed_transactions,
       :commit_version,
       :last_commit_version,
       :storage_teams,
       :logs_by_id,
       resolver_data: [],
       aborted_indices: [],
+      aborted_indices_set: %MapSet{},
       aborted_replies: [],
       successful_replies: [],
       transactions_by_log: %{},
@@ -391,14 +393,15 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
     abort_reply_fn =
       Keyword.get(opts, :abort_reply_fn, &reply_to_all_clients_with_aborted_transactions/1)
 
+    indexed_transactions = Enum.with_index(plan.transactions)
+
     {aborted_replies, successful_replies, aborted_indices_set} =
-      split_transactions_by_abort_status(plan)
+      split_transactions_by_abort_status(plan, indexed_transactions)
 
     new_aborted_indices = MapSet.difference(aborted_indices_set, plan.replied_indices)
 
     new_aborted_replies =
-      plan.transactions
-      |> Enum.with_index()
+      indexed_transactions
       |> Enum.filter(fn {_transaction, idx} -> MapSet.member?(new_aborted_indices, idx) end)
       |> Enum.map(fn {{reply_fn, _transaction}, _idx} -> reply_fn end)
 
@@ -408,7 +411,9 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
 
     %{
       plan
-      | aborted_replies: aborted_replies,
+      | indexed_transactions: indexed_transactions,
+        aborted_indices_set: aborted_indices_set,
+        aborted_replies: aborted_replies,
         successful_replies: successful_replies,
         replied_indices: updated_replied_indices,
         stage: :aborts_notified
@@ -420,15 +425,13 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
 
   def reply_to_all_clients_with_aborted_transactions(aborts), do: Enum.each(aborts, & &1.({:error, :aborted}))
 
-  @spec split_transactions_by_abort_status(FinalizationPlan.t()) ::
+  @spec split_transactions_by_abort_status(FinalizationPlan.t(), list()) ::
           {[Batch.reply_fn()], [Batch.reply_fn()], MapSet.t()}
-  defp split_transactions_by_abort_status(plan) do
+  defp split_transactions_by_abort_status(plan, indexed_transactions) do
     aborted_set = MapSet.new(plan.aborted_indices)
 
     {aborted_replies, successful_replies} =
-      plan.transactions
-      |> Enum.with_index()
-      |> Enum.reduce({[], []}, fn {{reply_fn, _transaction}, idx}, {aborts_acc, success_acc} ->
+      Enum.reduce(indexed_transactions, {[], []}, fn {{reply_fn, _transaction}, idx}, {aborts_acc, success_acc} ->
         if MapSet.member?(aborted_set, idx) do
           {[reply_fn | aborts_acc], success_acc}
         else
@@ -436,7 +439,7 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
         end
       end)
 
-    {Enum.reverse(aborted_replies), Enum.reverse(successful_replies), aborted_set}
+    {aborted_replies, successful_replies, aborted_set}
   end
 
   @spec prepare_for_logging(FinalizationPlan.t()) :: FinalizationPlan.t()
@@ -454,34 +457,20 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
 
   @spec build_transactions_for_logs(FinalizationPlan.t(), %{Log.id() => [Bedrock.range_tag()]}) ::
           {:ok, %{Log.id() => Transaction.encoded()}} | {:error, term()}
-  defp build_transactions_for_logs(plan, logs_by_id) do
-    aborted_set = MapSet.new(plan.aborted_indices)
+  defp build_transactions_for_logs(%{} = plan, logs_by_id) do
+    initial_mutations_by_log = Map.new(logs_by_id, fn {key, _} -> {key, []} end)
 
-    initial_mutations_by_log =
-      logs_by_id
-      |> Map.keys()
-      |> Map.new(&{&1, []})
-
-    case plan.transactions
-         |> Enum.with_index()
-         |> Enum.reduce_while(
-           {:ok, initial_mutations_by_log},
-           fn transaction_with_idx, {:ok, acc} ->
-             process_transaction_for_logs(
-               transaction_with_idx,
-               aborted_set,
-               plan.storage_teams,
-               logs_by_id,
-               acc
-             )
-           end
-         ) do
+    plan.indexed_transactions
+    |> Enum.reduce_while({:ok, initial_mutations_by_log}, fn transaction_with_idx, {:ok, acc} ->
+      process_transaction_for_logs(transaction_with_idx, plan.aborted_indices_set, plan.storage_teams, logs_by_id, acc)
+    end)
+    |> case do
       {:ok, mutations_by_log} ->
         result =
           Map.new(mutations_by_log, fn {log_id, mutations_list} ->
             encoded =
               Transaction.encode(%{
-                mutations: Enum.reverse(mutations_list),
+                mutations: Enum.reverse(mutations_list), # Why reverse here?
                 commit_version: plan.commit_version
               })
 
@@ -631,7 +620,6 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
 
   def key_or_range_to_tags({start_key, end_key}, storage_teams) do
     tags =
-      storage_teams
       |> Enum.filter(fn %{key_range: {team_start, team_end}} ->
         ranges_intersect?(start_key, end_key, team_start, team_end)
       end)
@@ -659,12 +647,9 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
   def find_logs_for_tags(tags, logs_by_id) do
     tag_set = MapSet.new(tags)
 
-    logs_by_id
-    |> Enum.filter(fn {_log_id, log_tags} ->
-      log_tag_set = MapSet.new(log_tags)
-      not MapSet.disjoint?(tag_set, log_tag_set)
-    end)
-    |> Enum.map(fn {log_id, _log_tags} -> log_id end)
+    for {log_id, log_tags} <- logs_by_id, Enum.any?(log_tags, &MapSet.member?(tag_set)) do
+      log_id
+    end
   end
 
   @spec ranges_intersect?(
@@ -678,6 +663,9 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
   defp ranges_intersect?(start1, :end, _start2, end2), do: start1 < end2
   defp ranges_intersect?(_start1, end1, start2, :end), do: end1 > start2
   defp ranges_intersect?(start1, end1, start2, end2), do: start1 < end2 and end1 > start2
+
+  defguard is_key_in_range(key, start_key, end_key) when
+    key >= start_key and (end_key == :end or key < end_key)
 
   @doc """
   Maps a key to all storage team tags that contain it.
@@ -703,50 +691,12 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
           {:ok, [Bedrock.range_tag()]}
   def key_to_tags(key, storage_teams) do
     tags =
-      storage_teams
-      |> Enum.filter(fn %{key_range: {start_key, end_key}} ->
-        key_in_range?(key, start_key, end_key)
-      end)
-      |> Enum.map(fn %{tag: tag} -> tag end)
+      for %{tag: tag, key_range: {team_start, team_end}} when is_key_in_range(key, team_start, team_end) <- storage_teams do
+        tag
+      end
 
     {:ok, tags}
   end
-
-  @doc """
-  Maps a key to its corresponding storage team tag (legacy function).
-
-  Searches through storage teams to find which team's key range contains
-  the given key. Uses lexicographic ordering where a key belongs to a team
-  if it falls within [start_key, end_key) or [start_key, :end).
-
-  This function returns the first matching tag for backward compatibility.
-  Consider using `key_to_tags/2` for multi-tag support.
-
-  ## Parameters
-    - `key`: The key to map to a storage team
-    - `storage_teams`: List of storage team descriptors
-
-  ## Returns
-    - `{:ok, tag}` if a matching storage team is found
-    - `{:error, :no_matching_team}` if no team covers the key
-
-  ## Examples
-      iex> teams = [%{tag: :team1, key_range: {"a", "m"}}, %{tag: :team2, key_range: {"m", :end}}]
-      iex> key_to_tag("hello", teams)
-      {:ok, :team1}
-  """
-  @spec key_to_tag(Bedrock.key(), [StorageTeamDescriptor.t()]) ::
-          {:ok, Bedrock.range_tag()} | {:error, :no_matching_team}
-  def key_to_tag(key, storage_teams) do
-    case key_to_tags(key, storage_teams) do
-      {:ok, [tag | _]} -> {:ok, tag}
-      {:ok, []} -> {:error, :no_matching_team}
-    end
-  end
-
-  @spec key_in_range?(Bedrock.key(), Bedrock.key(), Bedrock.key() | :end) :: boolean()
-  defp key_in_range?(key, start_key, :end), do: key >= start_key
-  defp key_in_range?(key, start_key, end_key), do: key >= start_key and key < end_key
 
   @spec push_to_logs(FinalizationPlan.t(), TransactionSystemLayout.t(), keyword()) ::
           FinalizationPlan.t()
@@ -770,15 +720,19 @@ defmodule Bedrock.DataPlane.CommitProxy.Finalization do
     end
   end
 
-  @spec resolve_log_descriptors(%{Log.id() => term()}, %{term() => ServiceDescriptor.t()}) :: %{
+  @spec resolve_log_descriptors(%{Log.id() => term()}, %{Log.id() => ServiceDescriptor.t()}) :: %{
           Log.id() => ServiceDescriptor.t()
         }
   def resolve_log_descriptors(log_descriptors, services) do
-    log_descriptors
-    |> Map.keys()
-    |> Enum.map(&{&1, Map.get(services, &1)})
-    |> Enum.reject(&is_nil(elem(&1, 1)))
-    |> Map.new()
+    Enum.reduce(log_descriptors, %{}, fn {log_id, _}, acc ->
+      case services do
+        %{^log_id => service_descriptor} when not is_nil(service_descriptor) ->
+          Map.put(acc, log_id, service_descriptor)
+
+        _ ->
+          acc
+      end
+    end)
   end
 
   @spec try_to_push_transaction_to_log(

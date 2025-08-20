@@ -100,7 +100,7 @@ defmodule Bedrock.DataPlane.CommitProxy.Server do
   def init({cluster, director, epoch, max_latency_in_ms, max_per_batch, empty_transaction_timeout_ms, lock_token}) do
     trace_metadata(%{cluster: cluster, pid: self()})
 
-    then(
+    state =
       %State{
         cluster: cluster,
         director: director,
@@ -109,9 +109,9 @@ defmodule Bedrock.DataPlane.CommitProxy.Server do
         max_per_batch: max_per_batch,
         empty_transaction_timeout_ms: empty_transaction_timeout_ms,
         lock_token: lock_token
-      },
-      &{:ok, &1, empty_transaction_timeout_ms}
-    )
+      }
+
+    {:ok, state, empty_transaction_timeout_ms}
   end
 
   @impl true
@@ -129,10 +129,12 @@ defmodule Bedrock.DataPlane.CommitProxy.Server do
         ) ::
           {:reply, term(), State.t()} | {:noreply, State.t(), timeout() | {:continue, term()}}
   def handle_call({:recover_from, lock_token, transaction_system_layout}, _from, %{mode: :locked} = t) do
-    if lock_token == t.lock_token do
-      reply(%{t | transaction_system_layout: transaction_system_layout, mode: :running}, :ok)
-    else
-      reply(t, {:error, :unauthorized})
+    case t.lock_token do
+      ^lock_token ->
+        reply(%{t | transaction_system_layout: transaction_system_layout, mode: :running}, :ok)
+
+      _ ->
+        reply(t, {:error, :unauthorized})
     end
   end
 
