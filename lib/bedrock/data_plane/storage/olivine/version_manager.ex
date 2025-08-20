@@ -205,19 +205,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     |> Enum.sort()
   end
 
-  defp add_unique_page_id(id, id_list, acc \\ [])
-  defp add_unique_page_id(id, [], acc), do: Enum.reverse(acc, [id])
-  defp add_unique_page_id(id, [h | t], acc) when id < h, do: Enum.reverse(acc, [id, h | t])
-  defp add_unique_page_id(id, [h | _t] = list, acc) when id == h, do: Enum.reverse(acc, list)
-  defp add_unique_page_id(id, [h | t], acc), do: add_unique_page_id(id, t, [h | acc])
-
-  defp maybe_add_deleted_page_id(condition, page_id, deleted_page_ids) do
-    if condition do
-      add_unique_page_id(page_id, deleted_page_ids)
-    else
-      deleted_page_ids
-    end
-  end
+  defp add_unique_page_id(id_list, id, acc \\ [])
+  defp add_unique_page_id([], id, acc), do: Enum.reverse(acc, [id])
+  defp add_unique_page_id([h | t], id, acc) when id < h, do: Enum.reverse(acc, [id, h | t])
+  defp add_unique_page_id([h | _t] = list, id, acc) when id == h, do: Enum.reverse(acc, list)
+  defp add_unique_page_id([h | t], id, acc), do: add_unique_page_id(t, id, [h | acc])
 
   @spec close(version_manager :: t()) :: :ok
   def close(version_manager) do
@@ -386,12 +378,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
          modified_page_ids
        )
        when length(updated_page.keys) <= 256 do
-    updated_tree = Tree.update_page_in_tree(tree, target_page_id, page.keys, updated_page.keys)
-    updated_page_map = Map.put(page_map, target_page_id, updated_page)
-
-    updated_modified_page_ids = add_unique_page_id(target_page_id, modified_page_ids)
-
-    {updated_tree, updated_page_map, deleted_page_ids, updated_modified_page_ids}
+    {
+      Tree.update_page_in_tree(tree, target_page_id, page.keys, updated_page.keys),
+      Map.put(page_map, target_page_id, updated_page),
+      deleted_page_ids,
+      add_unique_page_id(modified_page_ids, target_page_id)
+    }
   end
 
   # Handle page that needs splitting
@@ -425,16 +417,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
         end
       end)
 
-    split_modified_pages = [left_page.id, right_page.id]
-
     split_deleted_pages =
-      maybe_add_deleted_page_id(
-        target_page_id != left_page.id and target_page_id != right_page.id,
-        target_page_id,
+      if target_page_id != left_page.id and target_page_id != right_page.id do
+        add_unique_page_id(deleted_page_ids, target_page_id)
+      else
         deleted_page_ids
-      )
+      end
 
-    updated_modified_page_ids = Enum.reduce(split_modified_pages, modified_page_ids, &add_unique_page_id/2)
+    updated_modified_page_ids =
+      modified_page_ids
+      |> add_unique_page_id(left_page.id)
+      |> add_unique_page_id(right_page.id)
 
     {updated_tree, updated_page_map, split_deleted_pages, updated_modified_page_ids}
   end
@@ -460,7 +453,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           {
             Tree.remove_page_from_tree(tree, page_id, page.keys),
             Map.delete(page_map, page_id),
-            add_unique_page_id(page_id, deleted_page_ids),
+            add_unique_page_id(deleted_page_ids, page_id),
             modified_page_ids
           }
         else
@@ -470,7 +463,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
             Tree.update_page_in_tree(tree, page_id, page.keys, remaining_keys),
             Map.put(page_map, page_id, updated_page),
             deleted_page_ids,
-            add_unique_page_id(page_id, modified_page_ids)
+            add_unique_page_id(modified_page_ids, page_id)
           }
         end
     end
@@ -499,7 +492,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
         {
           Tree.remove_page_from_tree(tree_acc, page_id, page.keys),
           Map.delete(page_map_acc, page_id),
-          add_unique_page_id(page_id, deleted_acc),
+          add_unique_page_id(deleted_acc, page_id),
           modified_acc
         }
       else
@@ -510,7 +503,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           Tree.update_page_in_tree(tree_acc, page_id, page.keys, remaining_keys),
           Map.put(page_map_acc, page_id, updated_page),
           deleted_acc,
-          add_unique_page_id(page_id, modified_acc)
+          add_unique_page_id(modified_acc, page_id)
         }
       end
     end)
