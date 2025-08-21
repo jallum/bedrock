@@ -534,9 +534,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       Database.close(db)
     end
 
+    @tag :tmp_dir
     test "persist_values_to_database/3 stores values in batch", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "values.dets")
-      {:ok, db} = Database.open(:values_test, file_path)
+      table_name = String.to_atom("values_test_#{System.unique_integer([:positive])}")
+      {:ok, db} = Database.open(table_name, file_path)
       vm = VersionManager.new()
 
       values = [
@@ -629,9 +631,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       Database.close(db)
     end
 
+    @tag :tmp_dir
     test "advance_window_with_persistence/3 ensures durability", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "window.dets")
-      {:ok, db} = Database.open(:window_test, file_path)
+      table_name = String.to_atom("window_test_#{System.unique_integer([:positive])}")
+      {:ok, db} = Database.open(table_name, file_path)
       vm = VersionManager.new()
 
       # Store some data first
@@ -2043,19 +2047,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   end
 
   describe "Real Durability System Tests" do
-    @tag :tmp_dir
-    setup do
-      tmp_dir = "/tmp/durability_test_#{System.unique_integer([:positive])}"
-      File.rm_rf(tmp_dir)
-      File.mkdir_p!(tmp_dir)
-
-      on_exit(fn ->
-        File.rm_rf(tmp_dir)
-      end)
-
-      {:ok, tmp_dir: tmp_dir}
+    setup context do
+      case context[:tmp_dir] do
+        nil -> :ok
+        tmp_dir -> {:ok, tmp_dir: tmp_dir}
+      end
     end
 
+    @tag :tmp_dir
     test "persist_version_to_storage successfully persists pages and ETS values", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "persist_version.dets")
       {:ok, db} = Database.open(:persist_test, file_path)
@@ -2107,6 +2106,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       Database.close(db)
     end
 
+    @tag :tmp_dir
     test "persist_version_to_storage handles edge cases correctly", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "persist_edge_cases.dets")
       {:ok, db} = Database.open(:persist_edge_test, file_path)
@@ -2139,6 +2139,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       Database.close(db)
     end
 
+    @tag :tmp_dir
     test "persist_version_to_storage correctly handles multiple ETS versions", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "multi_version_ets.dets")
       {:ok, db} = Database.open(:multi_version_test, file_path)
@@ -2192,6 +2193,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       Database.close(db)
     end
 
+    @tag :tmp_dir
     test "advance_window_with_persistence actually persists evicted versions", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "window_eviction.dets")
       {:ok, db} = Database.open(:window_eviction_test, file_path)
@@ -2256,6 +2258,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       Database.close(db)
     end
 
+    @tag :tmp_dir
     test "end-to-end durability cycle: persist -> evict -> recover", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "durability_cycle.dets")
 
@@ -2688,10 +2691,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   end
 
   describe "integration tests - fetch flow" do
-    @tag :tmp_dir
-    setup do
+    setup %{tmp_dir: tmp_dir} do
       vm = VersionManager.new()
-      file_path = "/tmp/test_db_olivine/integration_test_#{System.unique_integer([:positive])}.dets"
+      file_path = Path.join(tmp_dir, "integration_test.dets")
       {:ok, database} = Database.open(:integration_test, file_path)
 
       # Create versions: one durable (in database) and one recent (in ETS)
@@ -2721,6 +2723,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       }
     end
 
+    @tag :tmp_dir
     test "complete flow: fetch version -> fetch_value from ETS", %{vm: vm, recent_version: recent_version} do
       # Step 1: fetch returns version
       {:ok, found_version} = fetch_key_version(vm, "recent_key", recent_version)
@@ -2731,6 +2734,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert value == "recent_value"
     end
 
+    @tag :tmp_dir
     test "complete flow: fetch version -> fetch_value -> database fallback", %{
       vm: vm,
       database: database,
@@ -2748,6 +2752,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert value == "durable_value"
     end
 
+    @tag :tmp_dir
     test "complete flow: fetch fails -> no value resolution needed", %{vm: vm, recent_version: recent_version} do
       # Step 1: fetch fails for nonexistent key
       {:error, :not_found} = fetch_key_version(vm, "nonexistent", recent_version)
@@ -2756,6 +2761,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       # This tests that the separation properly handles error propagation
     end
 
+    @tag :tmp_dir
     test "range fetch flow: get key-versions -> resolve values separately", %{
       vm: vm,
       database: database,
@@ -2791,10 +2797,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   end
 
   describe "edge cases and error scenarios" do
-    @tag :tmp_dir
-    setup do
+    setup %{tmp_dir: tmp_dir} do
       vm = VersionManager.new()
-      file_path = "/tmp/test_db_olivine/edge_test_#{System.unique_integer([:positive])}.dets"
+      file_path = Path.join(tmp_dir, "edge_test.dets")
       {:ok, database} = Database.open(:edge_test, file_path)
 
       # Create test scenario with mixed storage locations
@@ -2821,6 +2826,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       }
     end
 
+    @tag :tmp_dir
     test "version exists in page but value missing from ETS", %{vm: vm, recent_version: recent_version} do
       # Manually clear ETS entry for recent key to simulate missing value
       :ets.delete(vm.lookaside_buffer, {recent_version, "key_both"})
@@ -2833,6 +2839,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert VersionManager.fetch_value(vm, "key_both", found_version) == {:error, :not_found}
     end
 
+    @tag :tmp_dir
     test "version exists but value missing from database", %{
       vm: vm,
       database: database,
@@ -2853,6 +2860,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert Database.load_value(database, "missing_key") == {:error, :not_found}
     end
 
+    @tag :tmp_dir
     test "concurrent access - ETS entry appears between fetch and fetch_value", %{
       vm: vm,
       recent_version: recent_version
@@ -2870,6 +2878,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert VersionManager.fetch_value(vm, "key_both", found_version) == {:ok, "concurrent_value"}
     end
 
+    @tag :tmp_dir
     test "mixed storage key resolution workflow", %{vm: vm, database: database, recent_version: recent_version} do
       # This test demonstrates the fetch -> fetch_value -> database fallback workflow
       # It reuses existing keys from the setup to avoid MVCC complexity
@@ -2894,6 +2903,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       # version finding from value resolution, enabling efficient caching strategies
     end
 
+    @tag :tmp_dir
     test "error propagation maintains transaction semantics", %{vm: vm} do
       # Test that errors are properly propagated without side effects
       future_version = Version.from_integer(20_000_000)
