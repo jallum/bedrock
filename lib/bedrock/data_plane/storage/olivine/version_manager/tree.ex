@@ -22,7 +22,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
   @spec from_page_map(page_map :: map()) :: t()
   def from_page_map(page_map) do
     Enum.reduce(page_map, :gb_trees.empty(), fn {_page_id, page}, tree ->
-      add_page_to_tree(tree, page.id, page.keys)
+      add_page_to_tree(tree, page)
     end)
   end
 
@@ -71,40 +71,44 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree do
   @doc """
   Updates the interval tree by adding a new page range.
   """
-  @spec add_page_to_tree(t(), page_id(), [Bedrock.key()]) :: t()
-  def add_page_to_tree(tree, _page_id, []), do: tree
-
-  def add_page_to_tree(tree, page_id, [first_key | _] = keys),
-    do: :gb_trees.insert(List.last(keys), {page_id, first_key}, tree)
+  @spec add_page_to_tree(t(), page()) :: t()
+  def add_page_to_tree(tree, page) do
+    case {Page.left_key(page), Page.right_key(page)} do
+      # Empty page, don't add to tree
+      {nil, nil} -> tree
+      {first_key, last_key} -> :gb_trees.insert(last_key, {Page.id(page), first_key}, tree)
+    end
+  end
 
   @doc """
   Updates the interval tree by removing a page range.
   """
-  @spec remove_page_from_tree(t(), page_id(), [Bedrock.key()]) :: t()
-  def remove_page_from_tree(tree, _page_id, []), do: tree
-  def remove_page_from_tree(tree, _page_id, [_first_key | _] = keys), do: :gb_trees.delete_any(List.last(keys), tree)
+  @spec remove_page_from_tree(t(), page()) :: t()
+  def remove_page_from_tree(tree, page) do
+    case Page.right_key(page) do
+      # Empty page, nothing to remove
+      nil -> tree
+      last_key -> :gb_trees.delete_any(last_key, tree)
+    end
+  end
 
   @doc """
   Updates a page's position in the tree by removing the old range and adding the new range.
   Only updates if the range actually changed for efficiency.
   """
-  @spec update_page_in_tree(t(), page_id(), [binary()], [binary()]) :: t()
-  def update_page_in_tree(tree, page_id, old_keys, new_keys) do
-    old_range = first_and_last(old_keys)
-    new_range = first_and_last(new_keys)
+  @spec update_page_in_tree(t(), page(), page()) :: t()
+  def update_page_in_tree(tree, old_page, new_page) do
+    old_range = {Page.left_key(old_page), Page.right_key(old_page)}
+    new_range = {Page.left_key(new_page), Page.right_key(new_page)}
 
     if old_range == new_range do
       tree
     else
       tree
-      |> remove_page_from_tree(page_id, old_keys)
-      |> add_page_to_tree(page_id, new_keys)
+      |> remove_page_from_tree(old_page)
+      |> add_page_to_tree(new_page)
     end
   end
-
-  defp first_and_last([]), do: nil
-  defp first_and_last([first]), do: {first, first}
-  defp first_and_last([first | rest]), do: {first, List.last(rest)}
 
   @doc """
   Returns page IDs for all pages that overlap with the given query range.

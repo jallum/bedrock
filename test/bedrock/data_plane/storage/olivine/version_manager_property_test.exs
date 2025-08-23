@@ -43,6 +43,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
 
   import StreamData
 
+  alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree
@@ -86,7 +87,25 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
           keys <- key_list_generator(),
           versions <- list_of(version_generator(), length: length(keys))
         ) do
-      Page.new(page_id, keys, versions)
+      Page.new(page_id, Enum.zip(keys, versions))
+    end
+  end
+
+  def operation_generator do
+    one_of([
+      constant(:clear),
+      map(version_generator(), fn version -> {:set, version} end)
+    ])
+  end
+
+  def operation_map_generator do
+    gen all(
+          keys <- list_of(binary_key_generator(), min_length: 0, max_length: 10),
+          operations <- list_of(operation_generator(), length: length(keys))
+        ) do
+      keys
+      |> Enum.zip(operations)
+      |> Map.new()
     end
   end
 
@@ -137,7 +156,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
   defp build_pages_from_tuples(tuples) do
     Enum.map(tuples, fn {page_id, range_keys} ->
       simple_versions = Enum.map(range_keys, fn _ -> Version.from_integer(1) end)
-      Page.new(page_id, range_keys, simple_versions)
+      Page.new(page_id, Enum.zip(range_keys, simple_versions))
     end)
   end
 
@@ -148,10 +167,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
       if length(pages) > 0 do
         tree =
           Enum.reduce(pages, :gb_trees.empty(), fn page, tree_acc ->
-            if length(page.keys) > 0 do
-              Tree.add_page_to_tree(tree_acc, page.id, page.keys)
-            else
+            if Page.empty?(page) do
               tree_acc
+            else
+              Tree.add_page_to_tree(tree_acc, page)
             end
           end)
 
@@ -165,9 +184,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
         end)
 
         Enum.each(pages, fn page ->
-          Enum.each(page.keys, fn key ->
+          Enum.each(Page.keys(page), fn key ->
             found_page_id = Tree.page_for_key(tree, key)
-            assert found_page_id == page.id, "Key '#{key}' should find page #{page.id}"
+            assert found_page_id == Page.id(page), "Key '#{key}' should find page #{Page.id(page)}"
           end)
         end)
       end
@@ -179,15 +198,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
       if length(pages) > 0 do
         tree =
           Enum.reduce(pages, :gb_trees.empty(), fn page, tree_acc ->
-            Tree.add_page_to_tree(tree_acc, page.id, page.keys)
+            Tree.add_page_to_tree(tree_acc, page)
           end)
 
         Enum.each(pages, fn page ->
-          Enum.each(page.keys, fn key ->
+          Enum.each(Page.keys(page), fn key ->
             found_page_id = Tree.page_for_key(tree, key)
 
-            assert found_page_id == page.id,
-                   "Key '#{key}' should be found in page #{page.id}, but found in #{inspect(found_page_id)}"
+            assert found_page_id == Page.id(page),
+                   "Key '#{key}' should be found in page #{Page.id(page)}, but found in #{inspect(found_page_id)}"
           end)
         end)
       end
@@ -202,14 +221,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
       if length(pages) > 0 do
         tree =
           Enum.reduce(pages, :gb_trees.empty(), fn page, tree_acc ->
-            Tree.add_page_to_tree(tree_acc, page.id, page.keys)
+            Tree.add_page_to_tree(tree_acc, page)
           end)
 
         found_page_id = Tree.page_for_insertion(tree, test_key)
         assert is_integer(found_page_id), "page_for_insertion should always return a page_id"
         assert found_page_id >= 0, "page_id should be non-negative"
 
-        page_ids = Enum.map(pages, & &1.id)
+        page_ids = Enum.map(pages, &Page.id/1)
         assert found_page_id in page_ids, "Returned page_id should exist in the tree"
       end
     end
@@ -220,15 +239,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
       if length(pages) > 0 do
         tree =
           Enum.reduce(pages, :gb_trees.empty(), fn page, tree_acc ->
-            Tree.add_page_to_tree(tree_acc, page.id, page.keys)
+            Tree.add_page_to_tree(tree_acc, page)
           end)
 
         rightmost_page_id = Tree.find_rightmost_page(tree)
         assert is_integer(rightmost_page_id), "find_rightmost_page should return a page_id"
 
-        expected_page = Enum.max_by(pages, &List.last(&1.keys))
+        expected_page = Enum.max_by(pages, &Page.right_key/1)
 
-        assert rightmost_page_id == expected_page.id,
+        assert rightmost_page_id == Page.id(expected_page),
                "Rightmost page should be the one with highest last_key"
       end
     end
@@ -242,22 +261,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
             new_key <- binary_key_generator(),
             new_version <- version_generator()
           ) do
-      if length(page.keys) > 0 do
-        updated_page = Page.add_key_to_page(page, new_key, new_version)
+      if not Page.empty?(page) do
+        updated_page = PageTestHelpers.add_key_to_page(page, new_key, new_version)
 
-        assert updated_page.keys == Enum.sort(updated_page.keys),
+        assert PageTestHelpers.keys_are_sorted(updated_page),
                "Keys should remain sorted after insertion"
 
-        assert length(updated_page.keys) == length(updated_page.versions),
+        assert Page.key_count(updated_page) == length(Page.key_versions(updated_page)),
                "Number of keys and versions should match"
 
-        assert new_key in updated_page.keys, "New key should be present in the page"
+        assert Page.has_key?(updated_page, new_key), "New key should be present in the page"
 
-        if new_key in page.keys do
-          assert length(updated_page.keys) == length(page.keys),
+        if Page.has_key?(page, new_key) do
+          assert Page.key_count(updated_page) == Page.key_count(page),
                  "Page size shouldn't change when updating existing key"
         else
-          assert length(updated_page.keys) == length(page.keys) + 1,
+          assert Page.key_count(updated_page) == Page.key_count(page) + 1,
                  "Page size should increase by 1 when adding new key"
         end
       end
@@ -269,16 +288,19 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
             page <- page_generator(),
             new_keys <- key_list_generator(1, 5)
           ) do
-      if length(page.keys) > 0 do
-        tree = Tree.add_page_to_tree(:gb_trees.empty(), page.id, page.keys)
+      if not Page.empty?(page) do
+        tree = Tree.add_page_to_tree(:gb_trees.empty(), page)
 
-        updated_tree = Tree.update_page_in_tree(tree, page.id, page.keys, new_keys)
+        # Create a new page with the new keys for the update operation
+        new_versions = Enum.map(new_keys, fn _ -> Version.from_integer(1) end)
+        updated_page = Page.new(Page.id(page), Enum.zip(new_keys, new_versions))
+        updated_tree = Tree.update_page_in_tree(tree, page, updated_page)
 
         tree_entries = extract_tree_entries(updated_tree)
 
         if length(tree_entries) > 0 do
           {last_key, {found_page_id, first_key}} = List.first(tree_entries)
-          assert found_page_id == page.id, "Page ID should be preserved"
+          assert found_page_id == Page.id(page), "Page ID should be preserved"
           assert first_key == List.first(new_keys), "First key should be updated"
           assert last_key == List.last(new_keys), "Last key should be updated"
         end
@@ -296,23 +318,23 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
       if length(all_keys) > 256 do
         versions = Enum.map(all_keys, fn _ -> Version.from_integer(1) end)
         vm = VersionManager.new()
-        oversized_page = Page.new(1, all_keys, versions)
+        oversized_page = Page.new(1, Enum.zip(all_keys, versions))
 
-        case Page.split_page_simple(oversized_page, vm) do
+        case PageTestHelpers.split_page_simple(oversized_page, vm) do
           {{left_page, right_page}, _updated_vm} ->
-            assert length(left_page.keys) > 0, "Left page should have keys"
-            assert length(right_page.keys) > 0, "Right page should have keys"
-            assert length(left_page.keys) <= 256, "Left page should not exceed max size"
-            assert length(right_page.keys) <= 256, "Right page should not exceed max size"
+            assert not Page.empty?(left_page), "Left page should have keys"
+            assert not Page.empty?(right_page), "Right page should have keys"
+            assert Page.key_count(left_page) <= 256, "Left page should not exceed max size"
+            assert Page.key_count(right_page) <= 256, "Right page should not exceed max size"
 
-            assert left_page.keys == Enum.sort(left_page.keys), "Left page keys should be sorted"
-            assert right_page.keys == Enum.sort(right_page.keys), "Right page keys should be sorted"
+            assert PageTestHelpers.keys_are_sorted(left_page), "Left page keys should be sorted"
+            assert PageTestHelpers.keys_are_sorted(right_page), "Right page keys should be sorted"
 
-            all_new_keys = left_page.keys ++ right_page.keys
+            all_new_keys = Page.keys(left_page) ++ Page.keys(right_page)
             assert Enum.sort(all_new_keys) == Enum.sort(all_keys), "All keys should be preserved"
 
-            left_max = List.last(left_page.keys)
-            right_min = List.first(right_page.keys)
+            left_max = Page.right_key(left_page)
+            right_min = Page.left_key(right_page)
             assert left_max < right_min, "Left page max should be < right page min"
 
           {:error, :no_split_needed} ->
@@ -341,13 +363,108 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
             page <- page_generator(),
             test_key <- binary_key_generator()
           ) do
-      if length(page.keys) > 0 do
-        tree = Tree.add_page_to_tree(:gb_trees.empty(), page.id, page.keys)
+      if not Page.empty?(page) do
+        tree = Tree.add_page_to_tree(:gb_trees.empty(), page)
 
-        assert Tree.find_rightmost_page(tree) == page.id
+        assert Tree.find_rightmost_page(tree) == Page.id(page)
 
         found_page_id = Tree.page_for_insertion(tree, test_key)
-        assert found_page_id == page.id
+        assert found_page_id == Page.id(page)
+      end
+    end
+  end
+
+  property "apply_operations maintains sorted key order" do
+    check all(
+            page <- page_generator(),
+            operations <- operation_map_generator()
+          ) do
+      if not Page.empty?(page) or map_size(operations) > 0 do
+        updated_page = Page.apply_operations(page, operations)
+
+        assert PageTestHelpers.keys_are_sorted(updated_page),
+               "Keys should remain sorted after applying operations"
+
+        # Additional check: verify all keys are unique
+        keys = Page.keys(updated_page)
+
+        assert length(keys) == length(Enum.uniq(keys)),
+               "All keys should be unique after applying operations"
+
+        # Critical check: verify right_key returns the actual last key
+        if not Page.empty?(updated_page) do
+          expected_last_key = List.last(keys)
+          actual_last_key = Page.right_key(updated_page)
+
+          assert actual_last_key == expected_last_key,
+                 "right_key should return '#{expected_last_key}', but returned '#{actual_last_key}'"
+        end
+      end
+    end
+  end
+
+  property "right_key works correctly after last key changes" do
+    check all(
+            page <- page_generator(),
+            new_last_key <- binary_key_generator()
+          ) do
+      if not Page.empty?(page) do
+        original_last_key = Page.right_key(page)
+
+        # Test case 1: Add a key that becomes the new last key
+        if new_last_key > original_last_key do
+          operations = %{new_last_key => {:set, Version.from_integer(1)}}
+          updated_page = Page.apply_operations(page, operations)
+
+          assert Page.right_key(updated_page) == new_last_key,
+                 "After adding '#{new_last_key}', right_key should return it"
+        end
+
+        # Test case 2: Clear all keys
+        clear_operations =
+          page
+          |> Page.keys()
+          |> Map.new(&{&1, :clear})
+
+        cleared_page = Page.apply_operations(page, clear_operations)
+
+        if Page.empty?(cleared_page) do
+          # Empty page should handle right_key gracefully
+          try do
+            Page.right_key(cleared_page)
+          rescue
+            e -> flunk("right_key should handle empty page, but raised: #{inspect(e)}")
+          end
+        end
+      end
+    end
+  end
+
+  property "right_key extracts correct key from binary structure" do
+    check all(operations <- operation_map_generator()) do
+      if map_size(operations) > 0 do
+        # Start with empty page and apply operations
+        empty_page = Page.new(1, [])
+        result_page = Page.apply_operations(empty_page, operations)
+
+        if not Page.empty?(result_page) do
+          # Get all operations that weren't clears
+          non_clear_ops = Enum.reject(operations, fn {_key, op} -> op == :clear end)
+
+          if length(non_clear_ops) > 0 do
+            # The last key should be the lexicographically largest key from operations
+            expected_last_key =
+              non_clear_ops
+              |> Enum.map(fn {key, _op} -> key end)
+              |> Enum.sort()
+              |> List.last()
+
+            actual_last_key = Page.right_key(result_page)
+
+            assert actual_last_key == expected_last_key,
+                   "right_key should return '#{expected_last_key}' but returned '#{actual_last_key}'"
+          end
+        end
       end
     end
   end

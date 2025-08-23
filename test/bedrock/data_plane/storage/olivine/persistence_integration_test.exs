@@ -3,14 +3,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Logic
+  alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
   alias Bedrock.DataPlane.Version
 
   # Helper functions for cleaner test assertions
-  defp int_versions_to_binary(int_versions) when is_list(int_versions) do
-    Enum.map(int_versions, &Version.from_integer/1)
-  end
 
   describe "full persistence and recovery lifecycle" do
     @tag :tmp_dir
@@ -50,18 +48,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
     test "server startup with existing data performs recovery", %{tmp_dir: tmp_dir} do
       {:ok, db1} = Database.open(:session1, Path.join(tmp_dir, "dets"))
 
-      page0 = Page.new(0, [<<"start">>], int_versions_to_binary([10]))
-      page0 = %{page0 | next_id: 2}
+      page0 = Page.new(0, [{<<"start">>, Version.from_integer(10)}], 2)
 
-      page2 = Page.new(2, [<<"middle">>], int_versions_to_binary([20]))
-      page2 = %{page2 | next_id: 5}
+      page2 = Page.new(2, [{<<"middle">>, Version.from_integer(20)}], 5)
 
-      page5 = Page.new(5, [<<"end">>], int_versions_to_binary([30]))
-      page5 = %{page5 | next_id: 0}
+      page5 = Page.new(5, [{<<"end">>, Version.from_integer(30)}], 0)
 
-      :ok = Database.store_page(db1, 0, Page.to_binary(page0))
-      :ok = Database.store_page(db1, 2, Page.to_binary(page2))
-      :ok = Database.store_page(db1, 5, Page.to_binary(page5))
+      :ok = Database.store_page(db1, 0, Page.from_map(page0))
+      :ok = Database.store_page(db1, 2, Page.from_map(page2))
+      :ok = Database.store_page(db1, 5, Page.from_map(page5))
 
       values = [
         {<<"key1">>, <<"value1">>},
@@ -112,14 +107,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       table_name = String.to_atom("corrupt_test_#{System.unique_integer([:positive])}")
       {:ok, db1} = Database.open(table_name, Path.join(tmp_dir, "dets"))
 
-      page0 = Page.new(0, [<<"valid">>], int_versions_to_binary([100]))
-      page0 = %{page0 | next_id: 1}
-      :ok = Database.store_page(db1, 0, Page.to_binary(page0))
+      page0 = Page.new(0, [{<<"valid">>, Version.from_integer(100)}], 1)
+      :ok = Database.store_page(db1, 0, Page.from_map(page0))
 
       :ok = Database.store_page(db1, 1, <<"definitely_not_a_valid_page">>)
 
-      page3 = Page.new(3, [<<"isolated">>], int_versions_to_binary([300]))
-      :ok = Database.store_page(db1, 3, Page.to_binary(page3))
+      page3 = Page.new(3, [{<<"isolated">>, Version.from_integer(300)}])
+      :ok = Database.store_page(db1, 3, Page.from_map(page3))
 
       Database.close(db1)
 
@@ -133,13 +127,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       pages =
         for i <- 0..49 do
           next_id = if i == 49, do: 0, else: i + 1
-          page = Page.new(i, [<<"key_#{i}">>], int_versions_to_binary([i * 10]))
-          %{page | next_id: next_id}
+          Page.new(i, [{<<"key_#{i}">>, Version.from_integer(i * 10)}], next_id)
         end
 
       Enum.each(pages, fn page ->
-        page_binary = Page.to_binary(page)
-        :ok = Database.store_page(db1, page.id, page_binary)
+        :ok = Database.store_page(db1, Page.id(page), page)
       end)
 
       values =
@@ -174,8 +166,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
     test "multiple startup/shutdown cycles maintain data integrity", %{tmp_dir: tmp_dir} do
       {:ok, state1} = Logic.startup(:cycle1, self(), :test_id, tmp_dir)
 
-      page = Page.new(1, [<<"cycle1">>], int_versions_to_binary([100]))
-      :ok = Page.persist_page_to_database(state1.version_manager, state1.database, page)
+      page = Page.new(1, [{<<"cycle1">>, Version.from_integer(100)}])
+      :ok = PageTestHelpers.persist_page_to_database(state1.version_manager, state1.database, page)
 
       values1 = [{<<"cycle_key">>, 1, <<"cycle_value_1">>}]
       :ok = VersionManager.persist_values_to_database(state1.version_manager, state1.database, values1)
@@ -184,8 +176,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       {:ok, state2} = Logic.startup(:cycle2, self(), :test_id, tmp_dir)
 
-      page2 = Page.new(2, [<<"cycle2">>], int_versions_to_binary([200]))
-      :ok = Page.persist_page_to_database(state2.version_manager, state2.database, page2)
+      page2 = Page.new(2, [{<<"cycle2">>, Version.from_integer(200)}])
+      :ok = PageTestHelpers.persist_page_to_database(state2.version_manager, state2.database, page2)
 
       values2 = [{<<"cycle_key">>, 2, <<"cycle_value_2">>}]
       :ok = VersionManager.persist_values_to_database(state2.version_manager, state2.database, values2)
@@ -198,12 +190,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert vm.max_page_id == 0
 
       {:ok, page1_data} = Database.load_page(state3.database, 1)
-      {:ok, decoded1} = Page.from_binary(page1_data)
-      assert decoded1.keys == [<<"cycle1">>]
+      assert Page.keys(page1_data) == [<<"cycle1">>]
 
       {:ok, page2_data} = Database.load_page(state3.database, 2)
-      {:ok, decoded2} = Page.from_binary(page2_data)
-      assert decoded2.keys == [<<"cycle2">>]
+      assert Page.keys(page2_data) == [<<"cycle2">>]
 
       {:ok, val2} = Database.load_value(state3.database, <<"cycle_key">>)
       assert val2 == <<"cycle_value_2">>
@@ -233,8 +223,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       # Create database with pages but no page 0
       {:ok, db1} = Database.open(:no_zero, Path.join(tmp_dir, "dets"))
 
-      page5 = Page.new(5, [<<"orphan">>], int_versions_to_binary([500]))
-      :ok = Database.store_page(db1, 5, Page.to_binary(page5))
+      page5 = Page.new(5, [{<<"orphan">>, Version.from_integer(500)}])
+      :ok = Database.store_page(db1, 5, Page.from_map(page5))
 
       Database.close(db1)
 
@@ -275,8 +265,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       tasks = 1..10
 
       Enum.each(tasks, fn i ->
-        page = Page.new(i, [<<"concurrent_#{i}">>], int_versions_to_binary([i * 100]))
-        :ok = Page.persist_page_to_database(vm, db, page)
+        page = Page.new(i, [{<<"concurrent_#{i}">>, Version.from_integer(i * 100)}])
+        :ok = PageTestHelpers.persist_page_to_database(vm, db, page)
 
         values = [{<<"con_key_#{i}">>, i, <<"con_value_#{i}">>}]
         :ok = VersionManager.persist_values_to_database(vm, db, values)
@@ -285,8 +275,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       # Verify all operations completed successfully
       Enum.each(tasks, fn i ->
         {:ok, page_data} = Database.load_page(db, i)
-        {:ok, decoded} = Page.from_binary(page_data)
-        assert decoded.keys == [<<"concurrent_#{i}">>]
+        assert Page.keys(page_data) == [<<"concurrent_#{i}">>]
 
         {:ok, value} = Database.load_value(db, <<"con_key_#{i}">>)
         assert value == <<"con_value_#{i}">>
@@ -317,16 +306,16 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       {:ok, state} = Logic.startup(:criteria_pages, self(), :test_id, tmp_dir)
 
       # Create and persist a page
-      page = Page.new(42, [<<"test_key">>], int_versions_to_binary([12_345]))
-      :ok = Page.persist_page_to_database(state.version_manager, state.database, page)
+      page = Page.new(42, [{<<"test_key">>, Version.from_integer(12_345)}])
+      :ok = PageTestHelpers.persist_page_to_database(state.version_manager, state.database, page)
 
       # Retrieve and verify
       {:ok, retrieved_binary} = Database.load_page(state.database, 42)
-      {:ok, decoded_page} = Page.from_binary(retrieved_binary)
 
-      assert decoded_page.id == 42
-      assert decoded_page.keys == [<<"test_key">>]
-      assert decoded_page.versions == [Version.from_integer(12_345)]
+      assert Page.id(retrieved_binary) == 42
+      assert Page.keys(retrieved_binary) == [<<"test_key">>]
+      versions = Enum.map(Page.key_versions(retrieved_binary), fn {_key, version} -> version end)
+      assert versions == [Version.from_integer(12_345)]
 
       Logic.shutdown(state)
     end
@@ -369,9 +358,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       ]
 
       Enum.each(pages, fn {id, keys, next_id} ->
-        page = Page.new(id, keys, int_versions_to_binary([id * 10]))
-        page = %{page | next_id: next_id}
-        :ok = Database.store_page(db1, id, Page.to_binary(page))
+        page = Page.new(id, Enum.map(keys, &{&1, Version.from_integer(id * 10)}), next_id)
+        :ok = Database.store_page(db1, id, page)
       end)
 
       Database.close(db1)
@@ -398,8 +386,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       page_ids = [0, 5, 10, 3, 99, 50]
 
       Enum.each(page_ids, fn id ->
-        page = Page.new(id, [<<"page_#{id}">>], int_versions_to_binary([id]))
-        :ok = Database.store_page(db1, id, Page.to_binary(page))
+        page = Page.new(id, [{<<"page_#{id}">>, Version.from_integer(id)}])
+        :ok = Database.store_page(db1, id, Page.from_map(page))
       end)
 
       Database.close(db1)
@@ -553,12 +541,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       recent_version = Version.from_integer(2)
 
       # Create pages for both versions
-      old_page = Page.new(1, [<<"old_key">>], [old_version])
-      recent_page = Page.new(2, [<<"recent_key">>], [recent_version])
+      old_page = Page.new(1, [{<<"old_key">>, old_version}])
+      recent_page = Page.new(2, [{<<"recent_key">>, recent_version}])
 
       # Persist pages to DETS
-      :ok = Page.persist_page_to_database(vm, db, old_page)
-      :ok = Page.persist_page_to_database(vm, db, recent_page)
+      :ok = PageTestHelpers.persist_page_to_database(vm, db, old_page)
+      :ok = PageTestHelpers.persist_page_to_database(vm, db, recent_page)
 
       # Set up version manager
       vm = %{
@@ -584,12 +572,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       # But pages should still be retrievable from DETS
       {:ok, old_page_binary} = Database.load_page(db, 1)
-      {:ok, decoded_old_page} = Page.from_binary(old_page_binary)
-      assert decoded_old_page.keys == [<<"old_key">>]
+      assert Page.keys(old_page_binary) == [<<"old_key">>]
 
       {:ok, recent_page_binary} = Database.load_page(db, 2)
-      {:ok, decoded_recent_page} = Page.from_binary(recent_page_binary)
-      assert decoded_recent_page.keys == [<<"recent_key">>]
+      assert Page.keys(recent_page_binary) == [<<"recent_key">>]
 
       VersionManager.close(updated_vm)
       Database.close(db)

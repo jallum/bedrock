@@ -10,6 +10,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Logic
+  alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
   alias Bedrock.DataPlane.Transaction
@@ -79,8 +80,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       assert is_binary(applied_version2)
       assert is_binary(applied_version2)
 
-      test_page = Page.new(1, ["test:persist"], [applied_version1])
-      :ok = Page.persist_page_to_database(updated_vm2, state.database, test_page)
+      test_page = Page.new(1, [{"test:persist", applied_version1}])
+      :ok = PageTestHelpers.persist_page_to_database(updated_vm2, state.database, test_page)
 
       test_values = [{"test:persist", applied_version1, "persisted_value"}]
       :ok = VersionManager.persist_values_to_database(updated_vm2, state.database, test_values)
@@ -577,14 +578,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
 
       # Persist data explicitly
       pages_to_persist = [
-        Page.new(1, ["users:alice"], [v2]),
-        Page.new(2, ["users:charlie"], [v2]),
-        Page.new(3, ["config:setting1"], [v1]),
-        Page.new(4, ["metrics:count"], [v3])
+        Page.new(1, [{"users:alice", v2}]),
+        Page.new(2, [{"users:charlie", v2}]),
+        Page.new(3, [{"config:setting1", v1}]),
+        Page.new(4, [{"metrics:count", v3}])
       ]
 
       Enum.each(pages_to_persist, fn page ->
-        :ok = Page.persist_page_to_database(vm3, state1.database, page)
+        :ok = PageTestHelpers.persist_page_to_database(vm3, state1.database, page)
       end)
 
       values_to_persist = [
@@ -625,8 +626,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
 
       # Verify pages were rebuilt correctly
       {:ok, page1_binary} = Database.load_page(recovered_state.database, 1)
-      {:ok, page1_decoded} = Page.from_binary(page1_binary)
-      assert page1_decoded.keys == ["users:alice"]
+      assert Page.keys(page1_binary) == ["users:alice"]
 
       Logic.shutdown(recovered_state)
     end
@@ -637,8 +637,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       {:ok, db} = Database.open(:corruption_test, Path.join(tmp_dir, "dets"))
 
       # Store valid data
-      valid_page = Page.new(1, ["valid:key"], [Version.from_integer(1)])
-      :ok = Database.store_page(db, 1, Page.to_binary(valid_page))
+      valid_page = Page.new(1, [{"valid:key", Version.from_integer(1)}])
+      :ok = Database.store_page(db, 1, Page.from_map(valid_page))
 
       # Store corrupted page
       :ok = Database.store_page(db, 2, <<"corrupted_binary_data">>)
@@ -685,8 +685,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       vm1 = VersionManager.apply_transactions(state1.version_manager, [tx1])
 
       # Persist data
-      initial_page = Page.new(1, ["initial:key1", "initial:key2"], [v1, v1])
-      :ok = Page.persist_page_to_database(vm1, state1.database, initial_page)
+      initial_page = Page.new(1, [{"initial:key1", v1}, {"initial:key2", v1}])
+      :ok = PageTestHelpers.persist_page_to_database(vm1, state1.database, initial_page)
 
       initial_values = [
         {"initial:key1", v1, "value1"},
@@ -716,8 +716,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       vm2 = VersionManager.apply_transactions(state2.version_manager, [tx2])
 
       # Persist new data
-      after_page = Page.new(2, ["after:recovery"], [v2])
-      :ok = Page.persist_page_to_database(vm2, state2.database, after_page)
+      after_page = Page.new(2, [{"after:recovery", v2}])
+      :ok = PageTestHelpers.persist_page_to_database(vm2, state2.database, after_page)
 
       new_values = [
         {"after:recovery", v2, "new_data"},

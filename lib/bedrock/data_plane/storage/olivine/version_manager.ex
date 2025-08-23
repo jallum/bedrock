@@ -20,16 +20,18 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   32-byte header (all big-endian):
   <<PageId:64/big,           # 8 bytes
     NextPageId:64/big,       # 8 bytes
-    KeyCount:32/big,         # 4 bytes
-    LastKeyOffset:32/big,    # 4 bytes - byte offset to last key
-    Reserved:64/big,         # 8 bytes
-    % Version block (8-byte aligned):
-    Versions/binary,         # KeyCount * 8 bytes, each Version:64/big
-    % Key block:
-    Keys/binary>>            # Variable length, 16-bit prefixed keys
+    KeyCount:16/big,         # 2 bytes (supports up to 65535 keys)
+    LastKeyOffset:32/big,    # 4 bytes - byte offset to start of last key
+    Reserved:80/big,         # 10 bytes
+    % Interleaved entries (repeated KeyCount times):
+    Version:64/big,          # 8 bytes
+    KeyLength:16/big,        # 2 bytes
+    Key/binary>>             # KeyLength bytes
   ```
 
-  Keys are encoded with 16-bit length prefixes for efficient parsing.
+  Keys and versions are stored as interleaved pairs for better cache locality.
+  LastKeyOffset points to the start of the last key (after its version and length prefix),
+  allowing O(1) access to the last key by reading from that offset to end of binary.
   """
 
   alias Bedrock.Cluster.Gateway.TransactionBuilder.Tx
@@ -43,12 +45,33 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   @type page :: Page.t()
 
   @type loader_fn :: (Bedrock.key(), Bedrock.version() -> {:ok, Bedrock.value()} | {:error, :not_found})
-  @type version_data :: {
-          tree :: :gb_trees.tree(),
-          page_map :: map(),
-          deleted_page_ids :: [page_id()],
-          modified_page_ids :: [page_id()]
-        }
+
+  @type operation :: {:set, Bedrock.version()} | :clear
+
+  defmodule VersionData do
+    @moduledoc false
+    alias Bedrock.DataPlane.Storage.Olivine.VersionManager
+
+    @type operation :: VersionManager.operation()
+
+    @type t :: %__MODULE__{
+            tree: :gb_trees.tree(),
+            page_map: map(),
+            deleted_page_ids: [Page.id()],
+            modified_page_ids: [Page.id()],
+            pending_operations: %{Page.id() => %{Bedrock.key() => operation()}}
+          }
+
+    defstruct [
+      :tree,
+      :page_map,
+      :deleted_page_ids,
+      :modified_page_ids,
+      :pending_operations
+    ]
+  end
+
+  @type version_data :: VersionData.t()
 
   @opaque t :: %__MODULE__{
             versions: [{Bedrock.version(), version_data()}],
@@ -73,12 +96,20 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   def new do
     lookaside_buffer = :ets.new(:olivine_lookaside, [:ordered_set, :protected, {:read_concurrency, true}])
 
-    initial_page = Page.new(0, [], [])
+    initial_page_binary = Page.new(0, [])
     initial_tree = :gb_trees.empty()
-    initial_page_map = %{0 => initial_page}
+    initial_page_map = %{0 => initial_page_binary}
+
+    initial_version_data = %VersionData{
+      tree: initial_tree,
+      page_map: initial_page_map,
+      deleted_page_ids: [],
+      modified_page_ids: [],
+      pending_operations: %{}
+    }
 
     %__MODULE__{
-      versions: [{Version.zero(), {initial_tree, initial_page_map, [], []}}],
+      versions: [{Version.zero(), initial_version_data}],
       current_version: Version.zero(),
       durable_version: Version.zero(),
       window_size_in_microseconds: 5_000_000,
@@ -106,14 +137,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
         # Create initial page_map - if empty database, include page 0 like new() does
         initial_page_map =
           if :gb_trees.is_empty(tree) and max_page_id == 0 do
-            %{0 => Page.new(0, [], [])}
+            %{0 => Page.new(0, [])}
           else
             %{}
           end
 
         # Properly reconstruct the last durable version as both current_version and top of versions stack
+        initial_version_data = %VersionData{
+          tree: tree,
+          page_map: initial_page_map,
+          deleted_page_ids: [],
+          modified_page_ids: [],
+          pending_operations: %{}
+        }
+
         version_manager = %__MODULE__{
-          versions: [{durable_version, {tree, initial_page_map, [], []}}],
+          versions: [{durable_version, initial_version_data}],
           current_version: durable_version,
           durable_version: durable_version,
           window_size_in_microseconds: 5_000_000,
@@ -152,20 +191,33 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   defp load_page_chain(_database, page_id, page_map) when is_map_key(page_map, page_id), do: {:error, :cycle_detected}
 
   defp load_page_chain(database, page_id, page_map) do
-    with {:ok, page_binary} <- Database.load_page(database, page_id),
-         {:ok, page} <- Page.from_binary(page_binary) do
-      page_map
-      |> Map.put(page_id, page)
-      |> continue_page_chain(database, page)
-    else
-      {:error, :not_found} when page_id == 0 -> {:error, :no_chain}
-      {:error, :not_found} -> {:error, :broken_chain}
-      {:error, _reason} -> {:error, :corrupted_page}
+    case Database.load_page(database, page_id) do
+      {:ok, page_binary} ->
+        # Basic validation of binary page format
+        case page_binary do
+          <<_id::64, _next_id::64, _key_count::16, _last_key_offset::32, _reserved::80, _entries::binary>> ->
+            page_map
+            |> Map.put(page_id, page_binary)
+            |> continue_page_chain(database, page_binary)
+
+          _ ->
+            {:error, :corrupted_page}
+        end
+
+      {:error, :not_found} when page_id == 0 ->
+        {:error, :no_chain}
+
+      {:error, :not_found} ->
+        {:error, :broken_chain}
     end
   end
 
-  defp continue_page_chain(page_map, _database, %{next_id: 0}), do: {:ok, page_map}
-  defp continue_page_chain(page_map, database, %{next_id: next_id}), do: load_page_chain(database, next_id, page_map)
+  defp continue_page_chain(page_map, database, page_binary) do
+    case Page.next_id(page_binary) do
+      0 -> {:ok, page_map}
+      next_id -> load_page_chain(database, next_id, page_map)
+    end
+  end
 
   defp calculate_free_page_ids(0, _all_existing_page_ids), do: []
 
@@ -235,7 +287,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     do: {:error, :version_too_new}
 
   def fetch_page_for_key(version_manager, key, version) do
-    with {tree, page_map, _, _} <- find_best_version_for_fetch(version_manager.versions, version),
+    with %VersionData{tree: tree, page_map: page_map} <- find_best_version_for_fetch(version_manager.versions, version),
          page_id when is_integer(page_id) <- Tree.page_for_key(tree, key) do
       {:ok, Map.fetch!(page_map, page_id)}
     else
@@ -263,7 +315,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
       nil ->
         {:ok, []}
 
-      {tree, page_map, _deleted_page_ids, _modified_page_ids} ->
+      %VersionData{tree: tree, page_map: page_map} ->
         pages =
           tree
           |> Tree.page_ids_in_range(start_key, end_key)
@@ -296,18 +348,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
   @doc """
   Applies mutations to create a new version state in the version manager.
-  Accepts any enumerable of mutations for memory efficiency.
+  Uses a two-pass approach: first collect all instructions, then process each page.
   """
   @spec apply_mutations_to_version(Enumerable.t(), Bedrock.version(), t()) :: t()
   def apply_mutations_to_version(mutations, new_version, version_manager) do
     current_page_data = get_current_page_data(version_manager)
 
-    updated_page_data =
+    # Pass 1: Distribute instructions across pages
+    page_data_with_instructions =
       Enum.reduce(mutations, current_page_data, fn mutation, page_data_acc ->
         apply_single_mutation(version_manager, mutation, new_version, page_data_acc)
       end)
 
-    updated_versions = [{new_version, updated_page_data} | version_manager.versions]
+    # Pass 2: Process all pending operations for each modified page
+    final_page_data = process_all_pending_operations(version_manager, page_data_with_instructions, new_version)
+
+    updated_versions = [{new_version, final_page_data} | version_manager.versions]
 
     %{version_manager | versions: updated_versions, current_version: new_version}
   end
@@ -327,167 +383,217 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   end
 
   @spec apply_set_mutation(t(), binary(), binary(), Bedrock.version(), version_data()) :: version_data()
-  defp apply_set_mutation(version_manager, key, value, new_version, page_data) do
-    {tree, page_map, deleted_page_ids, modified_page_ids} = page_data
-    target_page_id = Tree.page_for_insertion(tree, key)
+  defp apply_set_mutation(version_manager, key, value, new_version, %VersionData{} = page_data) do
+    target_page_id = Tree.page_for_insertion(page_data.tree, key)
 
-    page = Map.fetch!(page_map, target_page_id)
-    updated_page = Page.add_key_to_page(page, key, new_version)
+    # Store the value in lookaside buffer immediately
     true = :ets.insert_new(version_manager.lookaside_buffer, {{new_version, key}, value})
 
-    handle_page_split(
-      updated_page,
-      version_manager,
-      tree,
-      page_map,
-      target_page_id,
-      page,
-      deleted_page_ids,
-      modified_page_ids
-    )
+    # Add set operation to pending operations for this page (last-writer-wins)
+    set_operation = {:set, new_version}
+
+    updated_operations =
+      Map.update(page_data.pending_operations, target_page_id, %{key => set_operation}, fn page_ops ->
+        Map.put(page_ops, key, set_operation)
+      end)
+
+    %{page_data | pending_operations: updated_operations}
   end
 
-  # Handle page that doesn't need splitting
-  defp handle_page_split(
-         updated_page,
-         _version_manager,
-         tree,
-         page_map,
-         target_page_id,
-         page,
-         deleted_page_ids,
-         modified_page_ids
-       )
-       when length(updated_page.keys) <= 256 do
-    {
-      Tree.update_page_in_tree(tree, target_page_id, page.keys, updated_page.keys),
-      Map.put(page_map, target_page_id, updated_page),
-      deleted_page_ids,
-      add_unique_page_id(modified_page_ids, target_page_id)
-    }
+  @spec apply_clear_mutation(t(), binary(), Bedrock.version(), version_data()) :: version_data()
+  defp apply_clear_mutation(_version_manager, key, _new_version, %VersionData{} = page_data) do
+    case Tree.page_for_key(page_data.tree, key) do
+      nil ->
+        # Key doesn't exist, no operation needed
+        page_data
+
+      page_id ->
+        # Add clear operation to pending operations for this page (last-writer-wins)
+        clear_operation = :clear
+
+        updated_operations =
+          Map.update(page_data.pending_operations, page_id, %{key => clear_operation}, fn page_ops ->
+            Map.put(page_ops, key, clear_operation)
+          end)
+
+        %{page_data | pending_operations: updated_operations}
+    end
   end
 
-  # Handle page that needs splitting
+  @spec apply_range_clear_mutation(t(), binary(), binary(), Bedrock.version(), version_data()) :: version_data()
+  defp apply_range_clear_mutation(_version_manager, start_key, end_key, _new_version, %VersionData{} = page_data) do
+    overlapping_page_ids = Tree.page_ids_in_range(page_data.tree, start_key, end_key)
+
+    case overlapping_page_ids do
+      [] ->
+        # No pages in range, nothing to do
+        page_data
+
+      [single_page_id] ->
+        # Only one page overlaps, expand range to individual clear operations
+        page = Map.fetch!(page_data.page_map, single_page_id)
+        keys_to_clear = get_keys_in_range(page, start_key, end_key)
+
+        # Add individual clear operations for each key in range
+        updated_operations = add_clear_operations(page_data.pending_operations, single_page_id, keys_to_clear)
+
+        %{page_data | pending_operations: updated_operations}
+
+      multiple_page_ids ->
+        # Multiple pages: first and last get individual clears for keys in range, middle pages get deleted
+        first_page_id = List.first(multiple_page_ids)
+        last_page_id = List.last(multiple_page_ids)
+        middle_page_ids = multiple_page_ids |> Enum.drop(1) |> Enum.drop(-1)
+
+        # Handle first page - get keys from start_key to end of page
+        first_page = Map.fetch!(page_data.page_map, first_page_id)
+        first_page_end_key = Page.right_key(first_page)
+        first_clear_end = min(end_key, first_page_end_key || end_key)
+        first_keys_to_clear = get_keys_in_range(first_page, start_key, first_clear_end)
+
+        # Handle last page - get keys from start of page to end_key
+        last_page = Map.fetch!(page_data.page_map, last_page_id)
+        last_page_start_key = Page.left_key(last_page)
+        last_clear_start = max(start_key, last_page_start_key || start_key)
+        last_keys_to_clear = get_keys_in_range(last_page, last_clear_start, end_key)
+
+        # Remove middle pages immediately and clean up their pending operations
+        updated_tree =
+          Enum.reduce(middle_page_ids, page_data.tree, fn page_id, tree_acc ->
+            page = Map.fetch!(page_data.page_map, page_id)
+            Tree.remove_page_from_tree(tree_acc, page)
+          end)
+
+        updated_page_map =
+          Enum.reduce(middle_page_ids, page_data.page_map, fn page_id, map_acc ->
+            Map.delete(map_acc, page_id)
+          end)
+
+        # Since both lists are sorted, we can merge efficiently
+        updated_deleted_page_ids = merge_sorted_unique(page_data.deleted_page_ids, middle_page_ids)
+
+        updated_operations =
+          page_data.pending_operations
+          |> Map.drop(middle_page_ids)
+          |> add_clear_operations(first_page_id, first_keys_to_clear)
+          |> add_clear_operations(last_page_id, last_keys_to_clear)
+
+        %{
+          page_data
+          | tree: updated_tree,
+            page_map: updated_page_map,
+            deleted_page_ids: updated_deleted_page_ids,
+            pending_operations: updated_operations
+        }
+    end
+  end
+
+  # Helper function to get keys within a range from a page
+  @spec get_keys_in_range(Page.t(), Bedrock.key(), Bedrock.key()) :: [Bedrock.key()]
+  defp get_keys_in_range(page_binary, start_key, end_key) do
+    page_binary
+    |> Page.key_versions()
+    |> Enum.filter(fn {key, _version} -> key >= start_key and key <= end_key end)
+    |> Enum.map(fn {key, _version} -> key end)
+  end
+
+  @spec process_all_pending_operations(t(), version_data(), Bedrock.version()) :: version_data()
+  defp process_all_pending_operations(version_manager, %VersionData{} = page_data, new_version) do
+    # Process each page that has pending operations using sorted merge
+    page_data.pending_operations
+    |> Enum.reduce(page_data, fn {page_id, operations}, page_data_acc ->
+      process_page_operations(version_manager, page_data_acc, page_id, operations, new_version)
+    end)
+    |> clear_all_pending_operations()
+  end
+
+  @spec process_page_operations(t(), version_data(), page_id(), %{Bedrock.key() => operation()}, Bedrock.version()) ::
+          version_data()
+  defp process_page_operations(version_manager, %VersionData{} = page_data, page_id, operations, _new_version) do
+    page_binary = Map.fetch!(page_data.page_map, page_id)
+
+    # Apply operations and encode directly to binary (no intermediate struct)
+    updated_page_binary = Page.apply_operations(page_binary, operations)
+
+    # Handle page updates, splitting, or deletion
+    cond do
+      Page.empty?(updated_page_binary) ->
+        # Page is now empty, remove it
+        %{
+          page_data
+          | tree: Tree.remove_page_from_tree(page_data.tree, page_binary),
+            page_map: Map.delete(page_data.page_map, page_id),
+            deleted_page_ids: add_unique_page_id(page_data.deleted_page_ids, page_id)
+        }
+
+      Page.key_count(updated_page_binary) > 256 ->
+        # Page needs splitting
+        handle_page_split(version_manager, page_data, page_id, page_binary, updated_page_binary)
+
+      true ->
+        # Normal page update
+        %{
+          page_data
+          | tree: Tree.update_page_in_tree(page_data.tree, page_binary, updated_page_binary),
+            page_map: Map.put(page_data.page_map, page_id, updated_page_binary),
+            modified_page_ids: add_unique_page_id(page_data.modified_page_ids, page_id)
+        }
+    end
+  end
+
+  @spec handle_page_split(t(), version_data(), page_id(), binary(), binary()) :: version_data()
   defp handle_page_split(
-         updated_page,
          version_manager,
-         tree,
-         page_map,
-         target_page_id,
-         page,
-         deleted_page_ids,
-         modified_page_ids
+         %VersionData{} = page_data,
+         page_id,
+         original_page_binary,
+         updated_page_binary
        ) do
-    {{left_page, right_page}, _updated_vm} = Page.split_page_simple(updated_page, version_manager)
+    # Split the page directly using binary format
+    {{left_page_binary, right_page_binary}, _updated_vm} = split_page_binary(updated_page_binary, version_manager)
 
     updated_tree =
-      tree
-      |> Tree.remove_page_from_tree(target_page_id, page.keys)
-      |> Tree.add_page_to_tree(left_page.id, left_page.keys)
-      |> Tree.add_page_to_tree(right_page.id, right_page.keys)
+      page_data.tree
+      |> Tree.remove_page_from_tree(original_page_binary)
+      |> Tree.add_page_to_tree(left_page_binary)
+      |> Tree.add_page_to_tree(right_page_binary)
 
     updated_page_map =
-      page_map
-      |> Map.put(left_page.id, left_page)
-      |> Map.put(right_page.id, right_page)
+      page_data.page_map
+      |> Map.put(Page.id(left_page_binary), left_page_binary)
+      |> Map.put(Page.id(right_page_binary), right_page_binary)
       |> then(fn map ->
-        if target_page_id != left_page.id and target_page_id != right_page.id do
-          Map.delete(map, target_page_id)
+        if not Page.has_id?(left_page_binary, page_id) and not Page.has_id?(right_page_binary, page_id) do
+          Map.delete(map, page_id)
         else
           map
         end
       end)
 
     split_deleted_pages =
-      if target_page_id != left_page.id and target_page_id != right_page.id do
-        add_unique_page_id(deleted_page_ids, target_page_id)
+      if not Page.has_id?(left_page_binary, page_id) and not Page.has_id?(right_page_binary, page_id) do
+        add_unique_page_id(page_data.deleted_page_ids, page_id)
       else
-        deleted_page_ids
+        page_data.deleted_page_ids
       end
 
     updated_modified_page_ids =
-      modified_page_ids
-      |> add_unique_page_id(left_page.id)
-      |> add_unique_page_id(right_page.id)
+      page_data.modified_page_ids
+      |> add_unique_page_id(Page.id(left_page_binary))
+      |> add_unique_page_id(Page.id(right_page_binary))
 
-    {updated_tree, updated_page_map, split_deleted_pages, updated_modified_page_ids}
+    %{
+      page_data
+      | tree: updated_tree,
+        page_map: updated_page_map,
+        deleted_page_ids: split_deleted_pages,
+        modified_page_ids: updated_modified_page_ids
+    }
   end
 
-  @spec apply_clear_mutation(t(), binary(), Bedrock.version(), version_data()) :: version_data()
-  defp apply_clear_mutation(_version_manager, key, _new_version, page_data) do
-    {tree, page_map, deleted_page_ids, modified_page_ids} = page_data
-
-    case Tree.page_for_key(tree, key) do
-      nil ->
-        {tree, page_map, deleted_page_ids, modified_page_ids}
-
-      page_id ->
-        page = Map.fetch!(page_map, page_id)
-
-        {remaining_keys, remaining_versions} =
-          page.keys
-          |> Enum.zip(page.versions)
-          |> Enum.filter(fn {k, _v} -> k != key end)
-          |> Enum.unzip()
-
-        if remaining_keys == [] do
-          {
-            Tree.remove_page_from_tree(tree, page_id, page.keys),
-            Map.delete(page_map, page_id),
-            add_unique_page_id(deleted_page_ids, page_id),
-            modified_page_ids
-          }
-        else
-          updated_page = %{page | keys: remaining_keys, versions: remaining_versions}
-
-          {
-            Tree.update_page_in_tree(tree, page_id, page.keys, remaining_keys),
-            Map.put(page_map, page_id, updated_page),
-            deleted_page_ids,
-            add_unique_page_id(modified_page_ids, page_id)
-          }
-        end
-    end
-  end
-
-  @spec apply_range_clear_mutation(t(), binary(), binary(), Bedrock.version(), version_data()) :: version_data()
-  defp apply_range_clear_mutation(_version_manager, start_key, end_key, _new_version, page_data) do
-    {tree, page_map, deleted_page_ids, modified_page_ids} = page_data
-
-    overlapping_pages = Tree.page_ids_in_range(tree, start_key, end_key)
-
-    Enum.reduce(overlapping_pages, {tree, page_map, deleted_page_ids, modified_page_ids}, fn page_id,
-                                                                                             {tree_acc, page_map_acc,
-                                                                                              deleted_acc,
-                                                                                              modified_acc} ->
-      page = Map.fetch!(page_map_acc, page_id)
-
-      {remaining_keys, remaining_versions} =
-        page.keys
-        |> Enum.zip(page.versions)
-        |> Enum.filter(fn {key, _version} -> key < start_key or key > end_key end)
-        |> Enum.unzip()
-
-      if remaining_keys == [] do
-        # Page is now empty, remove it from tree
-        {
-          Tree.remove_page_from_tree(tree_acc, page_id, page.keys),
-          Map.delete(page_map_acc, page_id),
-          add_unique_page_id(deleted_acc, page_id),
-          modified_acc
-        }
-      else
-        # Update page with remaining keys
-        updated_page = %{page | keys: remaining_keys, versions: remaining_versions}
-
-        {
-          Tree.update_page_in_tree(tree_acc, page_id, page.keys, remaining_keys),
-          Map.put(page_map_acc, page_id, updated_page),
-          deleted_acc,
-          add_unique_page_id(modified_acc, page_id)
-        }
-      end
-    end)
+  @spec clear_all_pending_operations(version_data()) :: version_data()
+  defp clear_all_pending_operations(%VersionData{} = page_data) do
+    %{page_data | pending_operations: %{}}
   end
 
   # Helper Functions
@@ -553,7 +659,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   def persist_version_to_storage(
         version_manager,
         database,
-        {version, {tree, page_map, _deleted_page_ids, modified_page_ids}}
+        {version, %VersionData{tree: tree, page_map: page_map, modified_page_ids: modified_page_ids}}
       ) do
     modified_pages_result =
       modified_page_ids
@@ -576,10 +682,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   # Helper functions using consolidation principles
   @spec persist_pages_batch([Page.t()], Database.t()) :: :ok | {:error, term()}
   defp persist_pages_batch(pages, database) do
-    Enum.reduce_while(pages, :ok, fn page, :ok ->
-      page_binary = Page.to_binary(page)
-
-      case Database.store_page(database, page.id, page_binary) do
+    Enum.reduce_while(pages, :ok, fn page_binary, :ok ->
+      case Database.store_page(database, Page.id(page_binary), page_binary) do
         :ok -> {:cont, :ok}
         error -> {:halt, error}
       end
@@ -619,13 +723,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   def advance_window_with_persistence(version_manager, database, _window_data) do
     # Real durability implementation: persist versions that will be evicted
     window_start_version = calculate_window_start(version_manager)
-    {versions_to_keep, versions_to_evict} = split_versions_at_window(version_manager.versions, window_start_version)
 
-    case versions_to_evict do
-      [] ->
+    version_manager.versions
+    |> split_versions_at_window(window_start_version)
+    |> case do
+      {_versions_to_keep, []} ->
         {:ok, version_manager}
 
-      _ ->
+      {versions_to_keep, versions_to_evict} ->
         new_durable_version = elem(List.first(versions_to_evict), 0)
 
         {all_pages, all_values} = collect_persistence_data(version_manager, versions_to_evict)
@@ -646,12 +751,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           {[{Database.page_id(), binary()}], [{Bedrock.key(), Bedrock.value()}]}
   defp collect_persistence_data(version_manager, versions_to_evict) do
     {pages_acc, values_acc} =
-      Enum.reduce(versions_to_evict, {[], []}, fn {version, {_tree, page_map, _deleted_page_ids, modified_page_ids}},
+      Enum.reduce(versions_to_evict, {[], []}, fn {version,
+                                                   %VersionData{
+                                                     page_map: page_map,
+                                                     modified_page_ids: modified_page_ids
+                                                   }},
                                                   {pages_acc, values_acc} ->
         version_pages =
           Enum.map(modified_page_ids, fn page_id ->
-            page = Map.fetch!(page_map, page_id)
-            page_binary = Page.to_binary(page)
+            page_binary = Map.fetch!(page_map, page_id)
             {page_id, page_binary}
           end)
 
@@ -705,12 +813,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   without breaking the version abstraction.
   """
   @spec calculate_window_start(t()) :: Bedrock.version()
+  # Calculate window start based on current version (timestamp) minus window size
+  # Versions are microsecond timestamps, so we subtract window_size_in_microseconds
   def calculate_window_start(version_manager) do
-    # Calculate window start based on current version (timestamp) minus window size
-    # Versions are microsecond timestamps, so we subtract window_size_in_microseconds
-    current_timestamp = Version.to_integer(version_manager.current_version)
-    window_start_timestamp = max(0, current_timestamp - version_manager.window_size_in_microseconds)
-    Version.from_integer(window_start_timestamp)
+    Version.subtract(version_manager.current_version, version_manager.window_size_in_microseconds)
+  rescue
+    ArgumentError ->
+      # Underflow - return zero version
+      Version.zero()
   end
 
   @doc """
@@ -822,7 +932,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   @spec split_page_with_tree_update(page :: Page.t(), version_manager :: t()) ::
           {{Page.t(), Page.t()}, t()} | {:error, :no_split_needed}
   def split_page_with_tree_update(page, version_manager) do
-    case Page.split_page_simple(page, version_manager) do
+    case split_page_simple(page, version_manager) do
       {:error, :no_split_needed} = error ->
         error
 
@@ -831,14 +941,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           [] ->
             {{left_page, right_page}, updated_vm}
 
-          [{current_version, {tree, page_map, deleted_page_ids, modified_page_ids}} | rest_versions] ->
-            tree1 = Tree.remove_page_from_tree(tree, page.id, page.keys)
-            tree2 = Tree.add_page_to_tree(tree1, left_page.id, left_page.keys)
-            tree3 = Tree.add_page_to_tree(tree2, right_page.id, right_page.keys)
+          [{current_version, %VersionData{} = version_data} | rest_versions] ->
+            tree =
+              version_data.tree
+              |> Tree.remove_page_from_tree(page)
+              |> Tree.add_page_to_tree(left_page)
+              |> Tree.add_page_to_tree(right_page)
 
-            updated_versions = [
-              {current_version, {tree3, page_map, deleted_page_ids, modified_page_ids}} | rest_versions
-            ]
+            updated_version_data = %{version_data | tree: tree}
+            updated_versions = [{current_version, updated_version_data} | rest_versions]
 
             final_vm = %{updated_vm | versions: updated_versions}
 
@@ -856,7 +967,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   def get_current_tree(%__MODULE__{versions: []}),
     do: raise("Invalid state: version manager has no versions - this indicates a bug in recovery or initialization")
 
-  def get_current_tree(%__MODULE__{versions: [{_version, {tree, _, _, _}} | _]}), do: tree
+  def get_current_tree(%__MODULE__{versions: [{_version, %VersionData{tree: tree}} | _]}), do: tree
 
   @doc """
   Removes all entries for a specific version from the lookaside buffer.
@@ -929,4 +1040,73 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
     :ets.select(version_manager.lookaside_buffer, match_spec)
   end
+
+  # Page management functions moved from Page module
+
+  @spec split_page_simple(Page.t(), t()) :: {{Page.t(), Page.t()}, t()} | {:error, :no_split_needed}
+  defp split_page_simple(page, version_manager) when length(page.key_versions) > 256 do
+    key_versions = page.key_versions
+    mid_point = div(length(key_versions), 2)
+
+    {left_key_versions, right_key_versions} = Enum.split(key_versions, mid_point)
+
+    updated_vm = %{version_manager | max_page_id: max(version_manager.max_page_id, page.id)}
+    {right_id, vm1} = next_id_from_vm(updated_vm)
+
+    left_id = page.id
+
+    left_page = Page.new(left_id, left_key_versions, right_id)
+    right_page = Page.new(right_id, right_key_versions, page.next_id)
+
+    {{left_page, right_page}, vm1}
+  end
+
+  defp split_page_simple(_page, _version_manager), do: {:error, :no_split_needed}
+
+  # Binary-optimized page splitting using Page.split_page/3
+  @spec split_page_binary(binary(), t()) :: {{binary(), binary()}, t()} | {:error, :no_split_needed}
+  defp split_page_binary(page_binary, version_manager) do
+    <<page_id::64, _next_id::64, key_count::16, _last_key_offset::32, _reserved::80, _entries::binary>> = page_binary
+
+    if key_count <= 256 do
+      {:error, :no_split_needed}
+    else
+      # Calculate mid-point for splitting
+      mid_point = div(key_count, 2)
+
+      updated_vm = %{version_manager | max_page_id: max(version_manager.max_page_id, page_id)}
+      {new_page_id, vm1} = next_id_from_vm(updated_vm)
+
+      # Use the clean Page.split_page/3 function
+      {left_page_binary, right_page_binary} = Page.split_page(page_binary, mid_point, new_page_id)
+
+      {{left_page_binary, right_page_binary}, vm1}
+    end
+  end
+
+  defp next_id_from_vm(version_manager) do
+    case version_manager.free_page_ids do
+      [id | rest] ->
+        {id, %{version_manager | free_page_ids: rest}}
+
+      [] ->
+        new_id = version_manager.max_page_id + 1
+        {new_id, %{version_manager | max_page_id: new_id}}
+    end
+  end
+
+  # Helper function to add clear operations for keys on a specific page
+  defp add_clear_operations(operations, page_id, keys_to_clear) do
+    Enum.reduce(keys_to_clear, operations, fn key, ops_acc ->
+      Map.update(ops_acc, page_id, %{key => :clear}, &Map.put(&1, key, :clear))
+    end)
+  end
+
+  defp merge_sorted_unique(list1, list2), do: merge_sorted_unique(list1, list2, [])
+
+  defp merge_sorted_unique([h1 | t1], [h2 | t2], acc) when h1 < h2, do: merge_sorted_unique(t1, [h2 | t2], [h1 | acc])
+  defp merge_sorted_unique([h1 | t1], [h2 | t2], acc) when h1 > h2, do: merge_sorted_unique([h1 | t1], t2, [h2 | acc])
+  defp merge_sorted_unique([h | t1], [h | t2], acc), do: merge_sorted_unique(t1, t2, [h | acc])
+  defp merge_sorted_unique([], list2, acc), do: Enum.reverse(acc, list2)
+  defp merge_sorted_unique(list1, [], acc), do: Enum.reverse(acc, list1)
 end
