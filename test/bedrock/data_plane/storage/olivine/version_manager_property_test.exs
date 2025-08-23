@@ -262,7 +262,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
             new_version <- version_generator()
           ) do
       if not Page.empty?(page) do
-        updated_page = PageTestHelpers.add_key_to_page(page, new_key, new_version)
+        updated_page = Page.apply_operations(page, %{new_key => {:set, new_version}})
 
         assert PageTestHelpers.keys_are_sorted(updated_page),
                "Keys should remain sorted after insertion"
@@ -317,28 +317,30 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
 
       if length(all_keys) > 256 do
         versions = Enum.map(all_keys, fn _ -> Version.from_integer(1) end)
-        vm = VersionManager.new()
+        _vm = VersionManager.new()
         oversized_page = Page.new(1, Enum.zip(all_keys, versions))
 
-        case PageTestHelpers.split_page_simple(oversized_page, vm) do
-          {{left_page, right_page}, _updated_vm} ->
-            assert not Page.empty?(left_page), "Left page should have keys"
-            assert not Page.empty?(right_page), "Right page should have keys"
-            assert Page.key_count(left_page) <= 256, "Left page should not exceed max size"
-            assert Page.key_count(right_page) <= 256, "Right page should not exceed max size"
+        if Page.key_count(oversized_page) > 256 do
+          key_count = Page.key_count(oversized_page)
+          mid_point = div(key_count, 2)
+          new_page_id = 2
 
-            assert PageTestHelpers.keys_are_sorted(left_page), "Left page keys should be sorted"
-            assert PageTestHelpers.keys_are_sorted(right_page), "Right page keys should be sorted"
+          {left_page, right_page} = Page.split_page(oversized_page, mid_point, new_page_id)
 
-            all_new_keys = Page.keys(left_page) ++ Page.keys(right_page)
-            assert Enum.sort(all_new_keys) == Enum.sort(all_keys), "All keys should be preserved"
+          assert not Page.empty?(left_page), "Left page should have keys"
+          assert not Page.empty?(right_page), "Right page should have keys"
+          assert Page.key_count(left_page) <= 256, "Left page should not exceed max size"
+          assert Page.key_count(right_page) <= 256, "Right page should not exceed max size"
 
-            left_max = Page.right_key(left_page)
-            right_min = Page.left_key(right_page)
-            assert left_max < right_min, "Left page max should be < right page min"
+          assert PageTestHelpers.keys_are_sorted(left_page), "Left page keys should be sorted"
+          assert PageTestHelpers.keys_are_sorted(right_page), "Right page keys should be sorted"
 
-          {:error, :no_split_needed} ->
-            :ok
+          all_new_keys = Page.keys(left_page) ++ Page.keys(right_page)
+          assert Enum.sort(all_new_keys) == Enum.sort(all_keys), "All keys should be preserved"
+
+          left_max = Page.right_key(left_page)
+          right_min = Page.left_key(right_page)
+          assert left_max < right_min, "Left page max should be < right page min"
         end
       end
     end

@@ -126,8 +126,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     test "to_binary/1 and from_binary/1 round-trip correctly" do
       keys = [<<"apple">>, <<"banana">>, <<"cherry">>]
       versions = [100, 200, 300]
-      page = Page.new(42, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)))
-      page = PageTestHelpers.set_next_id(page, 99)
+      page = Page.new(42, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)), 99)
 
       encoded = Page.from_map(page)
       {:ok, decoded_page} = Page.to_map(encoded)
@@ -189,9 +188,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       versions = [100, 200, 300]
       page = Page.new(1, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)))
 
-      {:ok, version_apple} = PageTestHelpers.lookup_key_in_page(page, <<"apple">>)
-      {:ok, version_banana} = PageTestHelpers.lookup_key_in_page(page, <<"banana">>)
-      {:ok, version_cherry} = PageTestHelpers.lookup_key_in_page(page, <<"cherry">>)
+      {:ok, version_apple} = Page.find_version_for_key(page, <<"apple">>)
+      {:ok, version_banana} = Page.find_version_for_key(page, <<"banana">>)
+      {:ok, version_cherry} = Page.find_version_for_key(page, <<"cherry">>)
 
       assert version_apple == Version.from_integer(100)
       assert version_banana == Version.from_integer(200)
@@ -205,8 +204,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
           {<<"banana">>, Version.from_integer(200)}
         ])
 
-      assert {:error, :not_found} = PageTestHelpers.lookup_key_in_page(page, <<"missing">>)
-      assert {:error, :not_found} = PageTestHelpers.lookup_key_in_page(page, <<"zebra">>)
+      assert {:error, :not_found} = Page.find_version_for_key(page, <<"missing">>)
+      assert {:error, :not_found} = Page.find_version_for_key(page, <<"zebra">>)
     end
 
     test "add_key_to_page/3 inserts new keys in sorted order" do
@@ -216,13 +215,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
           {<<"cherry">>, Version.from_integer(300)}
         ])
 
-      updated_page = PageTestHelpers.add_key_to_page(page, <<"banana">>, Version.from_integer(200))
+      updated_page = Page.apply_operations(page, %{<<"banana">> => {:set, Version.from_integer(200)}})
       assert_key_versions_equal(updated_page, [{<<"apple">>, 100}, {<<"banana">>, 200}, {<<"cherry">>, 300}])
 
-      updated_page2 = PageTestHelpers.add_key_to_page(page, <<"aardvark">>, Version.from_integer(50))
+      updated_page2 = Page.apply_operations(page, %{<<"aardvark">> => {:set, Version.from_integer(50)}})
       assert_key_versions_equal(updated_page2, [{<<"aardvark">>, 50}, {<<"apple">>, 100}, {<<"cherry">>, 300}])
 
-      updated_page3 = PageTestHelpers.add_key_to_page(page, <<"zebra">>, Version.from_integer(400))
+      updated_page3 = Page.apply_operations(page, %{<<"zebra">> => {:set, Version.from_integer(400)}})
       assert_key_versions_equal(updated_page3, [{<<"apple">>, 100}, {<<"cherry">>, 300}, {<<"zebra">>, 400}])
     end
 
@@ -233,7 +232,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
           {<<"banana">>, Version.from_integer(200)}
         ])
 
-      updated_page = PageTestHelpers.add_key_to_page(page, <<"apple">>, Version.from_integer(150))
+      updated_page = Page.apply_operations(page, %{<<"apple">> => {:set, Version.from_integer(150)}})
       assert_key_versions_equal(updated_page, [{<<"apple">>, 150}, {<<"banana">>, 200}])
     end
 
@@ -247,7 +246,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
         keys_to_add
         |> Enum.zip(versions)
         |> Enum.reduce(page, fn {key, version}, acc_page ->
-          PageTestHelpers.add_key_to_page(acc_page, key, Version.from_integer(version))
+          Page.apply_operations(acc_page, %{key => {:set, Version.from_integer(version)}})
         end)
 
       assert_key_versions_equal(final_page, [
@@ -260,28 +259,38 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   end
 
   describe "page splitting" do
-    test "split_page_simple/2 does not split pages under threshold" do
+    test "split_page/3 works with pages under typical split threshold" do
       keys = for i <- 1..256, do: <<"key_#{String.pad_leading(to_string(i), 3, "0")}">>
       versions = Enum.map(1..256, & &1)
       page = Page.new(1, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)))
-      vm = VersionManager.new()
 
-      assert {:error, :no_split_needed} = PageTestHelpers.split_page_simple(page, vm)
+      key_count = Page.key_count(page)
+      mid_point = div(key_count, 2)
+      new_page_id = 999
+
+      {left_page, right_page} = Page.split_page(page, mid_point, new_page_id)
+
+      # Verify the split worked
+      assert Page.key_count(left_page) == mid_point
+      assert Page.key_count(right_page) == key_count - mid_point
+      assert Page.id(left_page) == 1
+      assert Page.id(right_page) == new_page_id
     end
 
-    test "split_page_simple/2 splits pages over threshold" do
+    test "split_page/3 splits pages over threshold" do
       keys = for i <- 1..300, do: <<"key_#{String.pad_leading(to_string(i), 3, "0")}">>
       versions = Enum.map(1..300, & &1)
-      page = Page.new(1, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)))
-      page = PageTestHelpers.set_next_id(page, 99)
+      page = Page.new(1, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)), 99)
 
-      vm = VersionManager.new()
-      {{left_page, right_page}, _updated_vm} = PageTestHelpers.split_page_simple(page, vm)
+      key_count = Page.key_count(page)
+      mid_point = div(key_count, 2)
+      new_page_id = 2
+
+      {left_page, right_page} = Page.split_page(page, mid_point, new_page_id)
 
       # Verify split results
       assert Page.id(left_page) == 1
-      # New page gets next available ID
-      assert Page.id(right_page) == 2
+      assert Page.id(right_page) == new_page_id
       assert Page.next_id(right_page) == 99
       assert Page.next_id(left_page) == Page.id(right_page)
 
@@ -304,14 +313,16 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert List.last(left_keys) < List.first(right_keys)
     end
 
-    test "split_page_simple/2 preserves key-version relationships" do
+    test "split_page/3 preserves key-version relationships" do
       key_versions =
         for i <- 1..300, do: {<<"key_#{String.pad_leading(to_string(i), 3, "0")}">>, Version.from_integer(i * 10)}
 
       page = Page.new(1, key_versions)
-      vm = VersionManager.new()
+      key_count = Page.key_count(page)
+      mid_point = div(key_count, 2)
+      new_page_id = 2
 
-      {{left_page, right_page}, _updated_vm} = PageTestHelpers.split_page_simple(page, vm)
+      {left_page, right_page} = Page.split_page(page, mid_point, new_page_id)
 
       # Verify all key-version pairs are preserved
       left_key_versions = Page.key_versions(left_page)

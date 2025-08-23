@@ -424,7 +424,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   """
   @spec split_page(binary(), non_neg_integer(), id()) :: {binary(), binary()}
   def split_page(page_binary, key_offset, new_page_id) do
-    <<page_id::64, next_id::64, _key_count::16, _last_key_offset::32, _reserved::80, _entries::binary>> = page_binary
+    <<page_id::32, next_id::32, _key_count::16, _last_key_offset::32, _reserved::16, _entries::binary>> = page_binary
 
     # Get all key-version pairs
     key_versions = key_versions(page_binary)
