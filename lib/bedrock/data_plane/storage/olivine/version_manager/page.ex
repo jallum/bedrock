@@ -95,7 +95,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
       entries::binary
     >> = page_binary
 
-    {parts, key_count_delta, last_key_info} = cruise_entries(entries, Enum.sort(operations), 32, [32], 0)
+    {parts, key_count_delta, last_key_info} = do_apply_operations(entries, Enum.sort(operations), 32, [32], 0)
     new_entries = convert_parts_to_iodata(parts, page_binary, [])
 
     new_last_key_offset =
@@ -131,16 +131,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
   defp convert_parts_to_iodata([], _page_binary, acc), do: acc
 
-  # Cruise through entries binary using rest pattern, emitting slice specs and new entries
-  @spec cruise_entries(
+  @spec do_apply_operations(
           binary(),
           [{binary(), operation()}],
           non_neg_integer(),
           list(),
           integer()
         ) :: {list(), integer(), integer() | :unchanged | :no_last_key}
-
-  defp cruise_entries(
+  defp do_apply_operations(
          <<_version::binary-size(8), key_len::unsigned-big-16, key::binary-size(key_len), rest::binary>> = entries,
          operations,
          current_offset,
@@ -152,54 +150,25 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
     case operations do
       [{op_key, op} | remaining_ops] when op_key < key ->
-        handle_insert_operation(
-          op,
-          op_key,
-          entries,
-          remaining_ops,
-          current_offset,
-          acc,
-          key_count_delta
-        )
+        handle_insert_operation(op, op_key, entries, remaining_ops, current_offset, acc, key_count_delta)
 
       [{^key, op} | remaining_ops] ->
-        handle_match_operation(
-          op,
-          key,
-          rest,
-          remaining_ops,
-          current_offset,
-          next_offset,
-          acc,
-          key_count_delta
-        )
+        handle_match_operation(op, key, rest, remaining_ops, current_offset, next_offset, acc, key_count_delta)
 
       _ ->
-        # No operation for this key, continue cruising
-        cruise_entries(rest, operations, next_offset, acc, key_count_delta)
+        do_apply_operations(rest, operations, next_offset, acc, key_count_delta)
     end
   end
 
-  defp cruise_entries(_entries, [], _current_offset, acc, key_count_delta) do
-    {acc, key_count_delta, :unchanged}
-  end
+  defp do_apply_operations(_entries, [], _current_offset, acc, key_count_delta), do: {acc, key_count_delta, :unchanged}
 
-  defp cruise_entries(_entries, operations, current_offset, acc, key_count_delta) do
-    # End of entries, close current slice and add any remaining operations
+  defp do_apply_operations(_entries, operations, current_offset, acc, key_count_delta) do
     new_acc = pop_slice_or_emit(acc, current_offset)
-
-    # Add any remaining operations as new entries
-    {final_parts, final_key_delta, last_key_offset_delta} =
-      add_remaining_operations_as_parts(operations, new_acc, key_count_delta)
-
-    {final_parts, final_key_delta, last_key_offset_delta}
+    add_remaining_operations_as_parts(operations, new_acc, key_count_delta)
   end
 
-  # Handle operations where op_key < current binary key (insertions)
-  defp handle_insert_operation(:clear, _op_key, entries, remaining_ops, current_offset, acc, key_count_delta) do
-    # Clear operations for non-existent keys do nothing
-    cruise_entries(entries, remaining_ops, current_offset, acc, key_count_delta)
-  end
+  defp handle_insert_operation(:clear, _op_key, entries, remaining_ops, current_offset, acc, key_count_delta),
+    do: do_apply_operations(entries, remaining_ops, current_offset, acc, key_count_delta)
 
   defp handle_insert_operation(
          {:set, new_version},
@@ -212,20 +181,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
        ) do
     new_entry = encode_version_key_entry(new_version, op_key)
     new_acc = [new_entry | pop_slice_or_emit(acc, current_offset)]
-
-    cruise_entries(
-      entries,
-      remaining_ops,
-      current_offset,
-      [current_offset | new_acc],
-      key_count_delta + 1
-    )
+    do_apply_operations(entries, remaining_ops, current_offset, [current_offset | new_acc], key_count_delta + 1)
   end
 
-  # Handle operations where op_key == current binary key (exact matches)
   defp handle_match_operation(:clear, _key, rest, remaining_ops, current_offset, next_offset, acc, key_count_delta) do
     new_acc = [next_offset | pop_slice_or_emit(acc, current_offset)]
-    cruise_entries(rest, remaining_ops, next_offset, new_acc, key_count_delta - 1)
+    do_apply_operations(rest, remaining_ops, next_offset, new_acc, key_count_delta - 1)
   end
 
   defp handle_match_operation(
@@ -240,8 +201,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
        ) do
     new_entry = encode_version_key_entry(new_version, key)
     new_acc = [next_offset, new_entry | pop_slice_or_emit(acc, current_offset)]
-
-    cruise_entries(rest, remaining_ops, next_offset, new_acc, key_count_delta)
+    do_apply_operations(rest, remaining_ops, next_offset, new_acc, key_count_delta)
   end
 
   # Helper function to pop slice start and either emit slice or just return tail
@@ -249,11 +209,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     case acc do
       [^current_offset | tail] -> tail
       [slice_start | tail] when is_integer(slice_start) -> [{slice_start, current_offset - slice_start} | tail]
-      [binary_entry | tail] when is_binary(binary_entry) -> [binary_entry | tail]
+      _ -> acc
     end
   end
 
-  # Add remaining operations as new entries (parts version)
+  # Add remaining operations as new entries
   @spec add_remaining_operations_as_parts([{binary(), operation()}], list(), integer()) ::
           {list(), integer(), integer() | :unchanged | :no_last_key}
   defp add_remaining_operations_as_parts([{_key, :clear} | tail], acc, key_count_delta),
@@ -261,7 +221,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
   defp add_remaining_operations_as_parts([{key, {:set, version}} | tail], acc, key_count_delta) do
     new_entry = encode_version_key_entry(version, key)
-    # Continue processing but remember this key as the potential last key
     add_remaining_operations_as_parts_with_last_key(tail, [new_entry | acc], key_count_delta + 1, byte_size(key))
   end
 
@@ -287,38 +246,39 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     add_remaining_operations_as_parts_with_last_key(tail, [new_entry | acc], key_count_delta + 1, byte_size(key))
   end
 
-  defp add_remaining_operations_as_parts_with_last_key([], acc, key_count_delta, last_key_len) do
-    {acc, key_count_delta, last_key_len}
-  end
+  defp add_remaining_operations_as_parts_with_last_key([], acc, key_count_delta, last_key_len),
+    do: {acc, key_count_delta, last_key_len}
 
-  # Encode a single version-key entry
   @spec encode_version_key_entry(Bedrock.version(), binary()) :: binary()
-  defp encode_version_key_entry(version, key) when is_binary(version) and byte_size(version) == 8 do
-    key_len = byte_size(key)
-    <<version::binary-size(8), key_len::unsigned-big-16, key::binary>>
-  end
+  defp encode_version_key_entry(version, key) when is_binary(version) and byte_size(version) == 8,
+    do: <<version::binary-size(8), byte_size(key)::unsigned-big-16, key::binary>>
 
   @spec to_map(binary()) :: {:ok, t()} | {:error, :invalid_page}
-  def to_map(binary) do
-    with <<id::unsigned-big-64, next_id::unsigned-big-64, key_count::unsigned-big-16, _last_key_offset::unsigned-big-32,
-           _reserved::unsigned-big-80, entries_data::binary>> <- binary,
-         {:ok, key_versions} <- decode_entries(entries_data, key_count, []) do
-      {:ok,
-       %{
-         id: id,
-         next_id: next_id,
-         key_versions: key_versions
-       }}
-    else
-      _ -> {:error, :invalid_page}
+  def to_map(
+        <<id::unsigned-big-64, next_id::unsigned-big-64, key_count::unsigned-big-16, _last_key_offset::unsigned-big-32,
+          _reserved::unsigned-big-80, entries_data::binary>>
+      ) do
+    entries_data
+    |> decode_entries(key_count, [])
+    |> case do
+      {:ok, key_versions} ->
+        {:ok,
+         %{
+           id: id,
+           next_id: next_id,
+           key_versions: key_versions
+         }}
+
+      error ->
+        error
     end
   end
+
+  def to_map(_), do: {:error, :invalid_page}
 
   # Decode interleaved version-key entries
   @spec decode_entries(binary(), non_neg_integer(), [{binary(), Bedrock.version()}]) ::
           {:ok, [{binary(), Bedrock.version()}]} | {:error, :invalid_entries}
-  defp decode_entries(_data, 0, acc), do: {:ok, Enum.reverse(acc)}
-
   defp decode_entries(
          <<version::binary-size(8), key_len::unsigned-big-16, key::binary-size(key_len), rest::binary>>,
          count,
@@ -327,6 +287,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     decode_entries(rest, count - 1, [{key, version} | acc])
   end
 
+  defp decode_entries(<<>>, 0, acc), do: {:ok, Enum.reverse(acc)}
   defp decode_entries(_, _, _), do: {:error, :invalid_entries}
 
   @spec id(t()) :: id()
