@@ -145,8 +145,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
       encoded = Page.from_map(page)
 
-      <<id::integer-64-big, next_id::integer-64-big, key_count::integer-16-big, last_key_offset::integer-32-big,
-        _reserved::unsigned-big-80, rest::binary>> = encoded
+      <<id::integer-32-big, next_id::integer-32-big, key_count::integer-16-big, last_key_offset::integer-32-big,
+        _reserved::unsigned-big-16, rest::binary>> = encoded
 
       assert id == 5
       assert next_id == 10
@@ -179,7 +179,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       # Invalid header with incorrect field sizes or incomplete entries
       invalid_header = <<1::32, 0::32, 1::16, 0::32, 0::16>>
       invalid_data = <<invalid_header::binary, "incomplete">>
-      assert {:error, :invalid_page} = Page.to_map(invalid_data)
+      assert {:error, :invalid_entries} = Page.to_map(invalid_data)
     end
   end
 

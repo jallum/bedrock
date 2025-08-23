@@ -52,15 +52,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     last_key_offset =
       case last_key_info do
         :no_last_key -> 0
-        key_length -> 32 + IO.iodata_length(entries_iodata) - key_length - 2
+        key_length -> 16 + IO.iodata_length(entries_iodata) - key_length - 2
       end
 
     header = <<
-      id::unsigned-big-64,
-      next_id::unsigned-big-64,
+      id::unsigned-big-32,
+      next_id::unsigned-big-32,
       key_count::unsigned-big-16,
       last_key_offset::unsigned-big-32,
-      0::unsigned-big-80
+      0::unsigned-big-16
     >>
 
     # Single conversion from iodata to binary
@@ -87,27 +87,27 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
   def apply_operations(page_binary, operations) when is_binary(page_binary) do
     <<
-      id::unsigned-big-64,
-      next_id::unsigned-big-64,
+      id::unsigned-big-32,
+      next_id::unsigned-big-32,
       key_count::unsigned-big-16,
       last_key_offset::unsigned-big-32,
-      _padding::unsigned-big-80,
+      _padding::unsigned-big-16,
       entries::binary
     >> = page_binary
 
-    {parts, key_count_delta, last_key_info} = do_apply_operations(entries, Enum.sort(operations), 32, [32], 0)
+    {parts, key_count_delta, last_key_info} = do_apply_operations(entries, Enum.sort(operations), 16, [16], 0)
     new_entries = convert_parts_to_iodata(parts, page_binary, [])
 
     new_last_key_offset =
       case last_key_info do
         :no_last_key -> 0
         :unchanged -> last_key_offset + IO.iodata_length(new_entries) - byte_size(entries)
-        key_length -> 32 + IO.iodata_length(new_entries) - key_length - 2
+        key_length -> 16 + IO.iodata_length(new_entries) - key_length - 2
       end
 
     header =
-      <<id::unsigned-big-64, next_id::unsigned-big-64, key_count + key_count_delta::unsigned-big-16,
-        new_last_key_offset::unsigned-big-32, 0::unsigned-big-80>>
+      <<id::unsigned-big-32, next_id::unsigned-big-32, key_count + key_count_delta::unsigned-big-16,
+        new_last_key_offset::unsigned-big-32, 0::unsigned-big-16>>
 
     IO.iodata_to_binary([header | new_entries])
   end
@@ -255,8 +255,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
   @spec to_map(binary()) :: {:ok, t()} | {:error, :invalid_page}
   def to_map(
-        <<id::unsigned-big-64, next_id::unsigned-big-64, key_count::unsigned-big-16, _last_key_offset::unsigned-big-32,
-          _reserved::unsigned-big-80, entries_data::binary>>
+        <<id::unsigned-big-32, next_id::unsigned-big-32, key_count::unsigned-big-16, _last_key_offset::unsigned-big-32,
+          _reserved::unsigned-big-16, entries_data::binary>>
       ) do
     entries_data
     |> decode_entries(key_count, [])
@@ -291,17 +291,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   defp decode_entries(_, _, _), do: {:error, :invalid_entries}
 
   @spec id(t()) :: id()
-  def id(<<page_id::unsigned-big-64, _rest::binary>>), do: page_id
+  def id(<<page_id::unsigned-big-32, _rest::binary>>), do: page_id
   def id(%{id: page_id}), do: page_id
 
   @spec next_id(t()) :: id()
-  def next_id(<<_page_id::unsigned-big-64, next_page_id::unsigned-big-64, _rest::binary>>), do: next_page_id
+  def next_id(<<_page_id::unsigned-big-32, next_page_id::unsigned-big-32, _rest::binary>>), do: next_page_id
   def next_id(%{next_id: next_page_id}), do: next_page_id
 
   @spec key_versions(t()) :: [{binary(), Bedrock.version()}]
   def key_versions(
-        <<_page_id::unsigned-big-64, _next_id::unsigned-big-64, key_count::unsigned-big-16,
-          _last_key_offset::unsigned-big-32, _reserved::unsigned-big-80, entries_data::binary>>
+        <<_page_id::unsigned-big-32, _next_id::unsigned-big-32, key_count::unsigned-big-16,
+          _last_key_offset::unsigned-big-32, _reserved::unsigned-big-16, entries_data::binary>>
       ) do
     {:ok, key_versions} = decode_entries(entries_data, key_count, [])
     key_versions
@@ -310,7 +310,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   def key_versions(%{key_versions: kvs}), do: kvs
 
   @spec key_count(t()) :: non_neg_integer()
-  def key_count(<<_page_id::unsigned-big-64, _next_id::unsigned-big-64, key_count::unsigned-big-16, _rest::binary>>),
+  def key_count(<<_page_id::unsigned-big-32, _next_id::unsigned-big-32, key_count::unsigned-big-16, _rest::binary>>),
     do: key_count
 
   def key_count(%{key_versions: kvs}), do: length(kvs)
@@ -324,11 +324,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   def extract_keys(page), do: keys(page)
 
   @spec left_key(t()) :: binary() | nil
-  def left_key(<<_page_id::unsigned-big-64, _next_id::unsigned-big-64, 0::unsigned-big-16, _rest::binary>>), do: nil
+  def left_key(<<_page_id::unsigned-big-32, _next_id::unsigned-big-32, 0::unsigned-big-16, _rest::binary>>), do: nil
 
   def left_key(
-        <<_page_id::unsigned-big-64, _next_id::unsigned-big-64, _key_count::unsigned-big-16,
-          _last_key_offset::unsigned-big-32, _reserved::unsigned-big-80, _version::binary-size(8),
+        <<_page_id::unsigned-big-32, _next_id::unsigned-big-32, _key_count::unsigned-big-16,
+          _last_key_offset::unsigned-big-32, _reserved::unsigned-big-16, _version::binary-size(8),
           key_len::unsigned-big-16, key::binary-size(key_len), _rest::binary>>
       ) do
     key
@@ -336,11 +336,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
   @spec right_key(t()) :: binary() | nil
   # O(1) access using last_key_offset - read from offset to end of binary
-  def right_key(<<_page_id::unsigned-big-64, _next_id::unsigned-big-64, 0::unsigned-big-16, _rest::binary>>), do: nil
+  def right_key(<<_page_id::unsigned-big-32, _next_id::unsigned-big-32, 0::unsigned-big-16, _rest::binary>>), do: nil
 
   def right_key(
-        <<_page_id::unsigned-big-64, _next_id::unsigned-big-64, _key_count::unsigned-big-16,
-          last_key_offset::unsigned-big-32, _reserved::unsigned-big-80, _data::binary-size(last_key_offset - 32),
+        <<_page_id::unsigned-big-32, _next_id::unsigned-big-32, _key_count::unsigned-big-16,
+          last_key_offset::unsigned-big-32, _reserved::unsigned-big-16, _data::binary-size(last_key_offset - 16),
           key_len::unsigned-big-16, key::binary-size(key_len)>>
       ) do
     key
@@ -352,8 +352,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   # Helper to search for a key in binary format
   @spec find_key_in_binary(binary(), Bedrock.key()) :: {:ok, Bedrock.version()} | {:error, :not_found} | :not_found
   defp find_key_in_binary(
-         <<_page_id::unsigned-big-64, _next_id::unsigned-big-64, key_count::unsigned-big-16,
-           _last_key_offset::unsigned-big-32, _reserved::unsigned-big-80, entries_data::binary>>,
+         <<_page_id::unsigned-big-32, _next_id::unsigned-big-32, key_count::unsigned-big-16,
+           _last_key_offset::unsigned-big-32, _reserved::unsigned-big-16, entries_data::binary>>,
          target_key
        ) do
     search_entries_for_key(entries_data, key_count, target_key)
