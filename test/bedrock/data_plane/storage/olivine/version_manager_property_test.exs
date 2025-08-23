@@ -87,7 +87,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
           keys <- key_list_generator(),
           versions <- list_of(version_generator(), length: length(keys))
         ) do
-      Page.new(page_id, Enum.zip(keys, versions))
+      Page.new(page_id, keys |> Enum.zip(versions) |> Enum.sort())
     end
   end
 

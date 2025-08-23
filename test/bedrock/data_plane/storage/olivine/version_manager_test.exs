@@ -141,13 +141,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     test "to_binary/1 creates proper binary format" do
       keys = [<<"a">>, <<"bb">>]
       versions = Enum.map([1000, 2000], &Version.from_integer/1)
-      page = Page.new(5, Enum.zip(keys, versions))
-      page = PageTestHelpers.set_next_id(page, 10)
+      page = Page.new(5, Enum.zip(keys, versions), 10)
 
       encoded = Page.from_map(page)
 
       <<id::integer-64-big, next_id::integer-64-big, key_count::integer-16-big, last_key_offset::integer-32-big,
-        _reserved::integer-80-big, rest::binary>> = encoded
+        _reserved::unsigned-big-80, rest::binary>> = encoded
 
       assert id == 5
       assert next_id == 10
@@ -178,7 +177,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert {:error, :invalid_page} = Page.to_map(<<1::32>>)
 
       # Invalid header with incorrect field sizes or incomplete entries
-      invalid_header = <<1::64, 0::64, 1::16, 0::32, 0::80>>
+      invalid_header = <<1::32, 0::32, 1::16, 0::32, 0::16>>
       invalid_data = <<invalid_header::binary, "incomplete">>
       assert {:error, :invalid_page} = Page.to_map(invalid_data)
     end

@@ -47,7 +47,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     key_count = length(key_versions)
 
     # Encode entries directly as iodata
-    {entries_iodata, last_key_offset} = encode_entries(key_versions, 32)
+    {entries_iodata, last_key_info} = encode_entries(key_versions)
+
+    last_key_offset =
+      case last_key_info do
+        :no_last_key -> 0
+        key_length -> 32 + IO.iodata_length(entries_iodata) - key_length - 2
+      end
 
     header = <<
       id::unsigned-big-64,
@@ -62,26 +68,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   end
 
   # Encode key-version pairs directly as iodata
-  @spec encode_entries([{binary(), Bedrock.version()}], non_neg_integer()) :: {iodata(), non_neg_integer()}
-  defp encode_entries(key_versions, base_offset) do
-    encode_entries(key_versions, base_offset, [], 0)
-  end
+  @spec encode_entries([{binary(), Bedrock.version()}]) :: {iodata(), integer() | :no_last_key}
+  defp encode_entries([]), do: {[], :no_last_key}
+  defp encode_entries(key_versions), do: encode_entries(key_versions, [], nil)
 
-  @spec encode_entries([{binary(), Bedrock.version()}], non_neg_integer(), iodata(), non_neg_integer()) ::
-          {iodata(), non_neg_integer()}
-  defp encode_entries([], _base_offset, acc, last_key_offset) do
-    {Enum.reverse(acc), last_key_offset}
-  end
+  @spec encode_entries([{binary(), Bedrock.version()}], iodata(), binary() | nil) :: {iodata(), integer()}
+  defp encode_entries([], acc, last_key), do: {Enum.reverse(acc), if(last_key, do: byte_size(last_key), else: 0)}
 
-  defp encode_entries([{key, version} | rest], base_offset, acc, _last_key_offset) do
-    entry = encode_version_key_entry(version, key)
-    entry_size = byte_size(entry)
-
-    # Last key offset points to the start of the key (after version and length)
-    new_last_key_offset = base_offset + 8 + 2
-
-    encode_entries(rest, base_offset + entry_size, [entry | acc], new_last_key_offset)
-  end
+  defp encode_entries([{key, version} | rest], acc, _last_key),
+    do: encode_entries(rest, [encode_version_key_entry(version, key) | acc], key)
 
   @doc """
   Applies a map of operations to a binary page, returning the updated binary page.
@@ -105,9 +100,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
     new_last_key_offset =
       case last_key_info do
-        :unchanged -> last_key_offset
         :no_last_key -> 0
-        key_length -> 32 + IO.iodata_length(new_entries) - key_length
+        :unchanged -> last_key_offset + IO.iodata_length(new_entries) - byte_size(entries)
+        key_length -> 32 + IO.iodata_length(new_entries) - key_length - 2
       end
 
     header =
@@ -186,7 +181,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
   end
 
   defp cruise_entries(_entries, [], _current_offset, acc, key_count_delta) do
-    # No more operations - last key didn't change, so offset delta is 0
     {acc, key_count_delta, :unchanged}
   end
 
@@ -267,12 +261,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
 
   defp add_remaining_operations_as_parts([{key, {:set, version}} | tail], acc, key_count_delta) do
     new_entry = encode_version_key_entry(version, key)
-
-    if [] == tail do
-      {[new_entry | acc], key_count_delta + 1, byte_size(key)}
-    else
-      add_remaining_operations_as_parts(tail, [new_entry | acc], key_count_delta + 1)
-    end
+    # Continue processing but remember this key as the potential last key
+    add_remaining_operations_as_parts_with_last_key(tail, [new_entry | acc], key_count_delta + 1, byte_size(key))
   end
 
   defp add_remaining_operations_as_parts([], acc, key_count_delta) do
@@ -281,6 +271,24 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
     else
       {acc, key_count_delta, :unchanged}
     end
+  end
+
+  # Helper that tracks the last key length when processing remaining operations
+  defp add_remaining_operations_as_parts_with_last_key([{_key, :clear} | tail], acc, key_count_delta, last_key_len),
+    do: add_remaining_operations_as_parts_with_last_key(tail, acc, key_count_delta, last_key_len)
+
+  defp add_remaining_operations_as_parts_with_last_key(
+         [{key, {:set, version}} | tail],
+         acc,
+         key_count_delta,
+         _last_key_len
+       ) do
+    new_entry = encode_version_key_entry(version, key)
+    add_remaining_operations_as_parts_with_last_key(tail, [new_entry | acc], key_count_delta + 1, byte_size(key))
+  end
+
+  defp add_remaining_operations_as_parts_with_last_key([], acc, key_count_delta, last_key_len) do
+    {acc, key_count_delta, last_key_len}
   end
 
   # Encode a single version-key entry
@@ -375,18 +383,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
           key_len::unsigned-big-16, key::binary-size(key_len)>>
       ) do
     key
-  end
-
-  def right_key(page_binary) when is_binary(page_binary) do
-    # Fallback: decode all key_versions and get the last one
-    case key_versions(page_binary) do
-      [] ->
-        nil
-
-      key_versions ->
-        {key, _version} = List.last(key_versions)
-        key
-    end
   end
 
   @spec find_version_for_key(t(), Bedrock.key()) :: {:ok, Bedrock.version()} | {:error, :not_found}

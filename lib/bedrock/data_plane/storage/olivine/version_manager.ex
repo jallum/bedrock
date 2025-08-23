@@ -195,7 +195,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
       {:ok, page_binary} ->
         # Basic validation of binary page format
         case page_binary do
-          <<_id::64, _next_id::64, _key_count::16, _last_key_offset::32, _reserved::80, _entries::binary>> ->
+          <<_id::32, _next_id::32, _key_count::16, _last_key_offset::32, _reserved::16, _entries::binary>> ->
             page_map
             |> Map.put(page_id, page_binary)
             |> continue_page_chain(database, page_binary)
@@ -1066,21 +1066,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   # Binary-optimized page splitting using Page.split_page/3
   @spec split_page_binary(binary(), t()) :: {{binary(), binary()}, t()} | {:error, :no_split_needed}
   defp split_page_binary(page_binary, version_manager) do
-    <<page_id::64, _next_id::64, key_count::16, _last_key_offset::32, _reserved::80, _entries::binary>> = page_binary
+    case Page.key_count(page_binary) do
+      key_count when key_count > 256 ->
+        {new_page_id, version_manager} = next_id_from_vm(version_manager)
 
-    if key_count <= 256 do
-      {:error, :no_split_needed}
-    else
-      # Calculate mid-point for splitting
-      mid_point = div(key_count, 2)
+        {Page.split_page(page_binary, div(key_count, 2), new_page_id), version_manager}
 
-      updated_vm = %{version_manager | max_page_id: max(version_manager.max_page_id, page_id)}
-      {new_page_id, vm1} = next_id_from_vm(updated_vm)
-
-      # Use the clean Page.split_page/3 function
-      {left_page_binary, right_page_binary} = Page.split_page(page_binary, mid_point, new_page_id)
-
-      {{left_page_binary, right_page_binary}, vm1}
+      _ ->
+        {:error, :no_split_needed}
     end
   end
 

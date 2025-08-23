@@ -117,8 +117,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       Database.close(db1)
 
-      # Recovery should return error when encountering corrupted pages
-      assert {:error, :corrupted_page} = Logic.startup(:corrupt_recovery, self(), :test_id, tmp_dir)
+      # Recovery should return error when encountering broken chain due to invalid page
+      assert {:error, :broken_chain} = Logic.startup(:corrupt_recovery, self(), :test_id, tmp_dir)
     end
 
     test "large dataset recovery performance", %{tmp_dir: tmp_dir} do
