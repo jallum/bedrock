@@ -255,7 +255,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
 
   # Key Insertion Properties
 
-  property "add_key_to_page maintains sorted order" do
+  property "apply_operations maintains sorted order" do
     check all(
             page <- page_generator(),
             new_key <- binary_key_generator(),

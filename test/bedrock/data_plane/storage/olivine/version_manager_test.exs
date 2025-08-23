@@ -83,7 +83,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   end
 
   describe "page creation" do
-    test "new/2 creates a page with key-version tuples" do
+    test "new/3 creates a page with key-version tuples" do
       keys = [<<"key1">>, <<"key2">>, <<"key3">>]
       versions = [100, 200, 300]
 
@@ -95,7 +95,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert Page.key_versions(page) == expected_key_versions
     end
 
-    test "new/2 creates a page with keys and default versions" do
+    test "new/3 creates a page with keys and default versions" do
       keys = [<<"key1">>, <<"key2">>]
 
       page = Page.new(1, Enum.map(keys, &{&1, Version.zero()}))
@@ -123,7 +123,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   end
 
   describe "binary page encoding/decoding" do
-    test "to_binary/1 and from_binary/1 round-trip correctly" do
+    test "from_map/1 and to_map/1 round-trip correctly" do
       keys = [<<"apple">>, <<"banana">>, <<"cherry">>]
       versions = [100, 200, 300]
       page = Page.new(42, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)), 99)
@@ -137,7 +137,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert Page.key_versions(decoded_page) == expected_key_versions
     end
 
-    test "to_binary/1 creates proper binary format" do
+    test "from_map/1 creates proper binary format" do
       keys = [<<"a">>, <<"bb">>]
       versions = Enum.map([1000, 2000], &Version.from_integer/1)
       page = Page.new(5, Enum.zip(keys, versions), 10)
@@ -164,7 +164,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert key2 == <<"bb">>
     end
 
-    test "from_binary/1 handles empty page" do
+    test "to_map/1 handles empty page" do
       empty_page = Page.new(1, [])
       encoded = Page.from_map(empty_page)
 
@@ -172,7 +172,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert Page.empty?(decoded)
     end
 
-    test "from_binary/1 handles malformed page data" do
+    test "to_map/1 handles malformed page data" do
       assert {:error, :invalid_page} = Page.to_map(<<1::32>>)
 
       # Invalid header with incorrect field sizes or incomplete entries
@@ -183,7 +183,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   end
 
   describe "key operations within pages" do
-    test "lookup_key_in_page/2 finds existing keys" do
+    test "find_version_for_key/2 finds existing keys" do
       keys = [<<"apple">>, <<"banana">>, <<"cherry">>]
       versions = [100, 200, 300]
       page = Page.new(1, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)))
@@ -197,7 +197,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert version_cherry == Version.from_integer(300)
     end
 
-    test "lookup_key_in_page/2 returns error for missing keys" do
+    test "find_version_for_key/2 returns error for missing keys" do
       page =
         Page.new(1, [
           {<<"apple">>, Version.from_integer(100)},
@@ -208,7 +208,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert {:error, :not_found} = Page.find_version_for_key(page, <<"zebra">>)
     end
 
-    test "add_key_to_page/3 inserts new keys in sorted order" do
+    test "apply_operations/2 inserts new keys in sorted order" do
       page =
         Page.new(1, [
           {<<"apple">>, Version.from_integer(100)},
@@ -225,7 +225,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert_key_versions_equal(updated_page3, [{<<"apple">>, 100}, {<<"cherry">>, 300}, {<<"zebra">>, 400}])
     end
 
-    test "add_key_to_page/3 updates existing keys" do
+    test "apply_operations/2 updates existing keys" do
       page =
         Page.new(1, [
           {<<"apple">>, Version.from_integer(100)},
@@ -236,7 +236,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert_key_versions_equal(updated_page, [{<<"apple">>, 150}, {<<"banana">>, 200}])
     end
 
-    test "add_key_to_page/3 maintains sorted order invariant" do
+    test "apply_operations/2 maintains sorted order invariant" do
       page = Page.new(1, [])
 
       keys_to_add = [<<"zebra">>, <<"apple">>, <<"mango">>, <<"banana">>]
@@ -781,7 +781,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert key_versions == expected
     end
 
-    test "stream_key_versions_in_range/3 works same as stream_key_versions_in_range/3" do
+    test "stream_key_versions_in_range/3 returns consistent results" do
       # Create pages with key-version pairs
       page =
         Page.new(1, [
