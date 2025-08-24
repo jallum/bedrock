@@ -216,13 +216,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   defp add_unique_page_id([h | _t] = list, id, acc) when id == h, do: Enum.reverse(acc, list)
   defp add_unique_page_id([h | t], id, acc), do: add_unique_page_id(t, id, [h | acc])
 
-  @spec close(version_manager :: t()) :: :ok
-  def close(_version_manager) do
-    # No resources to clean up in VersionManager anymore
-    # Database handles its own cleanup
-    :ok
-  end
-
   @spec fetch_page_for_key(t(), key :: Bedrock.key(), Bedrock.version()) ::
           {:ok, Page.t()}
           | {:error, :not_found}

@@ -47,11 +47,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert vm.current_version == Version.zero()
     end
 
-    test "close/1 properly cleans up ETS table" do
-      vm = VersionManager.new()
-      assert :ok = VersionManager.close(vm)
-    end
-
     test "next_id/1 allocates new page IDs sequentially" do
       vm = VersionManager.new()
 

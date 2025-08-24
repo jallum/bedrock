@@ -486,7 +486,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert {:ok, version} = Database.load_durable_version(db)
       assert version == v1
 
-      VersionManager.close(updated_vm)
       Database.close(db)
     end
 
@@ -516,7 +515,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       :ok = Database.store_value(db, <<"recent_key">>, <<"recent_value">>)
 
       # Advance window with persistence
-      {:ok, updated_vm} = VersionManager.advance_window_with_persistence(vm, db, nil)
+      {:ok, _updated_vm} = VersionManager.advance_window_with_persistence(vm, db, nil)
 
       # Data should be synced to disk (without version since DETS stores version-less)
       {:ok, old_value} = Database.load_value(db, <<"old_key">>)
@@ -525,7 +524,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       {:ok, recent_value} = Database.load_value(db, <<"recent_key">>)
       assert recent_value == <<"recent_value">>
 
-      VersionManager.close(updated_vm)
       Database.close(db)
     end
 
@@ -579,7 +577,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       {:ok, recent_page_binary} = Database.load_page(db, 2)
       assert Page.keys(recent_page_binary) == [<<"recent_key">>]
 
-      VersionManager.close(updated_vm)
       Database.close(db)
     end
 
@@ -588,7 +585,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       # Session 1: Create data with timestamps and shut down
       {:ok, db1} = Database.open(:session1, file_path)
-      vm1 = VersionManager.new()
+      _vm1 = VersionManager.new()
       # Mark as unused
       _current_time = :os.system_time(:millisecond)
 
@@ -603,7 +600,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       :ok = Database.store_value(db1, <<"key1">>, <<"value1">>)
       :ok = Database.store_value(db1, <<"key2">>, <<"value2">>)
 
-      VersionManager.close(vm1)
       Database.close(db1)
 
       # Session 2: Restart and verify window behavior
@@ -624,7 +620,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert {:ok, version} = Database.load_durable_version(db2)
       assert version == Version.zero()
 
-      VersionManager.close(vm2)
       Database.close(db2)
     end
   end

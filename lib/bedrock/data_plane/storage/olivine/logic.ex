@@ -37,8 +37,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
 
   @spec shutdown(State.t()) :: :ok
   def shutdown(%State{} = t) do
+    notify_waitlist_shutdown(t.waiting_fetches)
     :ok = Database.close(t.database)
-    :ok = VersionManager.close(t.version_manager)
   end
 
   @spec lock_for_recovery(State.t(), Director.ref(), Bedrock.epoch()) ::
@@ -286,4 +286,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   defp gather_info(:supported_info, _t), do: supported_info()
   defp gather_info(:utilization, t), do: VersionManager.info(t.version_manager, :utilization)
   defp gather_info(_unsupported, _t), do: {:error, :unsupported_info}
+
+  defp notify_waitlist_shutdown(waiting_fetches) do
+    waiting_fetches
+    |> Enum.flat_map(fn {_version, entries} -> entries end)
+    |> Enum.each(fn {_deadline, reply_fn, _fetch_request} ->
+      reply_fn.({:error, :shutting_down})
+    end)
+  end
 end

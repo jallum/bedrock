@@ -21,10 +21,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.ServerTest do
       File.rm(temp_path)
     end
 
-    test "VersionManager can be created and closed" do
+    test "VersionManager can be created" do
       vm = VersionManager.new()
       assert %VersionManager{} = vm
-      assert :ok = VersionManager.close(vm)
     end
 
     test "basic telemetry events can be emitted" do
