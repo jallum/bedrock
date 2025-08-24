@@ -29,9 +29,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   """
   @spec new() :: t()
   def new do
-    initial_page_binary = Page.new(0, [])
+    initial_page = Page.new(0, [])
     initial_tree = :gb_trees.empty()
-    initial_page_map = %{0 => initial_page_binary}
+    initial_page_map = %{0 => initial_page}
 
     %__MODULE__{
       tree: initial_tree,
@@ -85,29 +85,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   defp load_page_chain(_database, page_id, page_map) when is_map_key(page_map, page_id), do: {:error, :cycle_detected}
 
   defp load_page_chain(database, page_id, page_map) do
-    case Database.load_page(database, page_id) do
-      {:ok, page_binary} ->
-        # Basic validation of binary page format
-        case page_binary do
-          <<_id::32, _next_id::32, _key_count::16, _last_key_offset::32, _reserved::16, _entries::binary>> ->
-            page_map
-            |> Map.put(page_id, page_binary)
-            |> continue_page_chain(database, page_binary)
-
-          _ ->
-            {:error, :corrupted_page}
-        end
-
+    with {:ok, page} <- Database.load_page(database, page_id),
+         :ok <- Page.validate(page) do
+      page_map
+      |> Map.put(page_id, page)
+      |> continue_page_chain(database, page)
+    else
       {:error, :not_found} when page_id == 0 ->
         {:error, :no_chain}
 
-      {:error, :not_found} ->
+      _ ->
         {:error, :broken_chain}
     end
   end
 
-  defp continue_page_chain(page_map, database, page_binary) do
-    case Page.next_id(page_binary) do
+  defp continue_page_chain(page_map, database, page) do
+    case Page.next_id(page) do
       0 -> {:ok, page_map}
       next_id -> load_page_chain(database, next_id, page_map)
     end

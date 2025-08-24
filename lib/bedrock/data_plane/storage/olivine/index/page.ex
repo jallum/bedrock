@@ -249,6 +249,21 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.Page do
     end
   end
 
+  @doc """
+  Validates that a binary has the correct page format and valid last_key offset.
+  Returns :ok if valid, {:error, :corrupted_page} if invalid.
+  """
+  @spec validate(binary()) :: :ok | {:error, :corrupted_page}
+  def validate(<<_id::32, _next_id::32, 0::16, _last_key_offset::32, _reserved::16, _entries::binary>>), do: :ok
+
+  def validate(
+        <<_id::32, _next_id::32, _key_count::16, last_key_offset::32, _reserved::16,
+          _data::binary-size(last_key_offset - 16), _key_len::16, _key::binary>>
+      ),
+      do: :ok
+
+  def validate(_), do: {:error, :corrupted_page}
+
   @spec to_map(binary()) :: {:ok, t()} | {:error, :invalid_page}
   def to_map(
         <<id::unsigned-big-32, next_id::unsigned-big-32, key_count::unsigned-big-16, _last_key_offset::unsigned-big-32,
