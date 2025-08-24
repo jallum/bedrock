@@ -7,12 +7,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   @opaque t :: %__MODULE__{
             dets_storage: :dets.tab_name(),
             window_size_in_microseconds: pos_integer(),
-            lookaside_buffer: :ets.tab(),
+            buffer: :ets.tab(),
             durable_version: Bedrock.version()
           }
   defstruct dets_storage: nil,
             window_size_in_microseconds: 5_000_000,
-            lookaside_buffer: nil,
+            buffer: nil,
             durable_version: nil
 
   @spec open(otp_name :: atom(), file_path :: String.t()) ::
@@ -29,7 +29,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
 
     case :dets.open_file(otp_name, [{:file, String.to_charlist(file_path)} | storage_opts]) do
       {:ok, dets_table} ->
-        lookaside_buffer = :ets.new(:lookaside_buffer, [:ordered_set, :protected, {:read_concurrency, true}])
+        buffer = :ets.new(:buffer, [:ordered_set, :protected, {:read_concurrency, true}])
 
         durable_version =
           case load_durable_version_internal(dets_table) do
@@ -41,7 +41,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
          %__MODULE__{
            dets_storage: dets_table,
            window_size_in_microseconds: window_in_ms * 1_000,
-           lookaside_buffer: lookaside_buffer,
+           buffer: buffer,
            durable_version: durable_version
          }}
 
@@ -53,7 +53,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   @spec close(t()) :: :ok
   def close(database) do
     try do
-      :ets.delete(database.lookaside_buffer)
+      :ets.delete(database.buffer)
     catch
       _, _ -> :ok
     end
@@ -115,7 +115,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
           {:ok, Bedrock.value()} | {:error, :not_found}
   def fetch_value(database, key, version) do
     if version > database.durable_version do
-      case :ets.lookup(database.lookaside_buffer, {version, key}) do
+      case :ets.lookup(database.buffer, {version, key}) do
         [{_key_version, value}] -> {:ok, value}
         [] -> {:error, :not_found}
       end
@@ -131,7 +131,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   @spec store_value(t(), key :: Bedrock.key(), version :: Bedrock.version(), value :: Bedrock.value()) ::
           :ok | {:error, term()}
   def store_value(database, key, version, value) do
-    if :ets.insert_new(database.lookaside_buffer, {{version, key}, value}) do
+    if :ets.insert_new(database.buffer, {{version, key}, value}) do
       :ok
     else
       {:error, :already_exists}
@@ -145,7 +145,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   @spec store_page_version(t(), Page.id(), version :: Bedrock.version(), page_binary :: binary()) ::
           :ok | {:error, term()}
   def store_page_version(database, page_id, version, page_binary) do
-    if :ets.insert_new(database.lookaside_buffer, {{version, {:page, page_id}}, page_binary}) do
+    if :ets.insert_new(database.buffer, {{version, {:page, page_id}}, page_binary}) do
       :ok
     else
       {:error, :already_exists}
@@ -168,7 +168,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
 
     all_entries = value_entries ++ page_entries
 
-    if :ets.insert_new(database.lookaside_buffer, all_entries) do
+    if :ets.insert_new(database.buffer, all_entries) do
       :ok
     else
       {:error, :insert_failed}
@@ -186,12 +186,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
              | {:error, :shutting_down})
   def value_loader(database) do
     dets_storage = database.dets_storage
-    lookaside_buffer = database.lookaside_buffer
+    buffer = database.buffer
     durable_version = database.durable_version
 
     fn
       key, version when version > durable_version ->
-        case :ets.lookup(lookaside_buffer, {version, key}) do
+        case :ets.lookup(buffer, {version, key}) do
           [{_key_version, value}] -> {:ok, value}
           [] -> {:error, :not_found}
         end
@@ -322,7 +322,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   def advance_durable_version(database, new_durable_version, _versions_to_persist) do
     with :ok <- :dets.insert(database.dets_storage, build_dets_tx(database, new_durable_version)),
          :ok <- sync(database),
-         :ok <- cleanup_lookaside_buffer(database, new_durable_version) do
+         :ok <- cleanup_buffer(database, new_durable_version) do
       {:ok, %{database | durable_version: new_durable_version}}
     end
   end
@@ -330,9 +330,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   # Efficiently removes all entries for versions older than or equal to the durable version.
   # This is a more efficient way to clean up the lookaside buffer when advancing the durable version.
   # Uses a single select_delete operation to remove all obsolete entries at once.
-  @spec cleanup_lookaside_buffer(t(), version :: Bedrock.version()) :: :ok
-  defp cleanup_lookaside_buffer(database, durable_version) do
-    :ets.select_delete(database.lookaside_buffer, [{{{:"$1", :_}, :_}, [{:"=<", :"$1", durable_version}], [true]}])
+  @spec cleanup_buffer(t(), version :: Bedrock.version()) :: :ok
+  defp cleanup_buffer(database, durable_version) do
+    :ets.select_delete(database.buffer, [{{{:"$1", :_}, :_}, [{:"=<", :"$1", durable_version}], [true]}])
     :ok
   end
 
@@ -345,7 +345,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   def build_dets_tx(database, new_durable_version) do
     [
       {:durable_version, new_durable_version}
-      | database.lookaside_buffer
+      | database.buffer
         |> :ets.select_reverse([{{{:"$1", :"$2"}, :"$3"}, [{:"=<", :"$1", new_durable_version}], [{{:"$2", :"$3"}}]}])
         |> Enum.reduce(%{}, fn
           {{:page, page_id}, page_binary}, data_map ->
