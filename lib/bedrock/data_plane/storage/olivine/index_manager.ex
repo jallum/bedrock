@@ -68,20 +68,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
 
   @spec new() :: t()
   def new do
-    initial_page_binary = Page.new(0, [])
-    initial_tree = :gb_trees.empty()
-    initial_page_map = %{0 => initial_page_binary}
-
-    initial_version_data = %Index{
-      tree: initial_tree,
-      page_map: initial_page_map,
-      deleted_page_ids: [],
-      modified_page_ids: [],
-      pending_operations: %{}
-    }
-
     %__MODULE__{
-      versions: [{Version.zero(), initial_version_data}],
+      versions: [{Version.zero(), Index.new()}],
       current_version: Version.zero(),
       window_size_in_microseconds: 5_000_000,
       max_page_id: 0,

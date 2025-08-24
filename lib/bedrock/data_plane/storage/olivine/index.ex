@@ -25,6 +25,24 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   ]
 
   @doc """
+  Creates a new empty Index with an initial page.
+  """
+  @spec new() :: t()
+  def new do
+    initial_page_binary = Page.new(0, [])
+    initial_tree = :gb_trees.empty()
+    initial_page_map = %{0 => initial_page_binary}
+
+    %__MODULE__{
+      tree: initial_tree,
+      page_map: initial_page_map,
+      deleted_page_ids: [],
+      modified_page_ids: [],
+      pending_operations: %{}
+    }
+  end
+
+  @doc """
   Loads an Index from the database by traversing the page chain and building the tree structure.
   Returns {:ok, index, max_page_id, free_page_ids} or an error.
   """
@@ -57,18 +75,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
         {:ok, index, max_page_id, free_page_ids}
 
       {:error, :no_chain} ->
-        # Empty database - return empty index with page 0
-        initial_page_map = %{0 => Page.new(0, [])}
-
-        index = %__MODULE__{
-          tree: :gb_trees.empty(),
-          page_map: initial_page_map,
-          deleted_page_ids: [],
-          modified_page_ids: [],
-          pending_operations: %{}
-        }
-
-        {:ok, index, 0, []}
+        {:ok, new(), 0, []}
 
       {:error, reason} ->
         {:error, reason}
@@ -117,7 +124,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
 
   @doc """
   Finds the page containing the given key in this index.
-  Returns {:ok, page_binary} if found, {:error, :not_found} if not found.
+  Returns {:ok, Page.t()} if found, {:error, :not_found} if not found.
   """
   @spec page_for_key(t(), Bedrock.key()) :: {:ok, Page.t()} | {:error, :not_found}
   def page_for_key(%__MODULE__{tree: tree, page_map: page_map}, key) do
@@ -131,15 +138,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
 
   @doc """
   Finds all pages that contain keys within the given range in this index.
-  Returns {:ok, [page_binary]} with the list of pages (may be empty).
+  Returns {:ok, [Page.t()]} with the list of pages (may be empty).
   """
   @spec pages_for_range(t(), Bedrock.key(), Bedrock.key()) :: {:ok, [Page.t()]}
   def pages_for_range(%__MODULE__{tree: tree, page_map: page_map}, start_key, end_key) do
-    pages =
-      tree
-      |> Tree.page_ids_in_range(start_key, end_key)
-      |> Enum.map(&Map.fetch!(page_map, &1))
-
-    {:ok, pages}
+    {:ok,
+     tree
+     |> Tree.page_ids_in_range(start_key, end_key)
+     |> Enum.map(&Map.fetch!(page_map, &1))}
   end
 end
