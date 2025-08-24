@@ -24,7 +24,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.ServerTest do
     test "VersionManager can be created and closed" do
       vm = VersionManager.new()
       assert %VersionManager{} = vm
-      assert vm.lookaside_buffer
       assert :ok = VersionManager.close(vm)
     end
 

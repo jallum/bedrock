@@ -37,7 +37,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       {:ok, state} = Logic.startup(:test_e2e, self(), random_id(), tmp_dir)
 
       assert state.version_manager.current_version == Version.zero()
-      assert state.version_manager.durable_version == Version.zero()
+      assert {:ok, version} = Database.load_durable_version(state.database)
+      assert version == Version.zero()
 
       v1 = Version.from_integer(1)
 
@@ -52,7 +53,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       updated_vm1 =
         VersionManager.apply_transactions(
           state.version_manager,
-          [transaction1]
+          [transaction1],
+          state.database
         )
 
       applied_version1 = updated_vm1.current_version
@@ -73,7 +75,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       updated_vm2 =
         VersionManager.apply_transactions(
           updated_vm1,
-          [transaction2]
+          [transaction2],
+          state.database
         )
 
       applied_version2 = updated_vm2.current_version
@@ -119,7 +122,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "c:key1" => "valueC1"
         })
 
-      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1], state.database)
       _state1 = %{state | version_manager: vm1}
 
       tx2 =
@@ -129,12 +132,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "d:key1" => "valueD1"
         })
 
-      vm2 = VersionManager.apply_transactions(vm1, [tx2])
+      vm2 = VersionManager.apply_transactions(vm1, [tx2], state.database)
       _state2 = %{state | version_manager: vm2}
 
       tx3 = create_range_clear_transaction(v3, "a:", "b:")
 
-      vm3 = VersionManager.apply_transactions(vm2, [tx3])
+      vm3 = VersionManager.apply_transactions(vm2, [tx3], state.database)
       state3 = %{state | version_manager: vm3}
 
       assert vm3.current_version != Version.zero()
@@ -168,7 +171,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       updated_vm =
         VersionManager.apply_transactions(
           state.version_manager,
-          [large_tx]
+          [large_tx],
+          state.database
         )
 
       applied_version = updated_vm.current_version
@@ -205,7 +209,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "test:key2" => "value2"
         })
 
-      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1], state.database)
       applied_version1 = vm1.current_version
       state1 = %{state | version_manager: vm1}
 
@@ -270,7 +274,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "other:key" => "other_value"
         })
 
-      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1], state.database)
       applied_version1 = vm1.current_version
       state1 = %{state | version_manager: vm1}
 
@@ -388,7 +392,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "key5" => "value5"
         })
 
-      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1], state.database)
       updated_state = %{state | version_manager: vm1}
 
       # Test range fetch that includes some keys
@@ -447,7 +451,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "test_key" => "test_value"
         })
 
-      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1], state.database)
       updated_state = %{state | version_manager: vm1}
 
       # Test future version
@@ -497,7 +501,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
         end
 
       tx1 = TransactionTestSupport.new_log_transaction(v1, key_value_map)
-      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1], state.database)
       updated_state = %{state | version_manager: vm1}
 
       # Verify that we have multiple pages by checking some pages exist
@@ -570,9 +574,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
         })
 
       # Apply transactions
-      vm1 = VersionManager.apply_transactions(state1.version_manager, [tx1])
-      vm2 = VersionManager.apply_transactions(vm1, [tx2])
-      vm3 = VersionManager.apply_transactions(vm2, [tx3])
+      vm1 = VersionManager.apply_transactions(state1.version_manager, [tx1], state1.database)
+      vm2 = VersionManager.apply_transactions(vm1, [tx2], state1.database)
+      vm3 = VersionManager.apply_transactions(vm2, [tx3], state1.database)
 
       final_state1 = %{state1 | version_manager: vm3}
 
@@ -682,7 +686,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "initial:key2" => "value2"
         })
 
-      vm1 = VersionManager.apply_transactions(state1.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state1.version_manager, [tx1], state1.database)
 
       # Persist data
       initial_page = Page.new(1, [{"initial:key1", v1}, {"initial:key2", v1}])
@@ -713,7 +717,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "initial:key1" => "updated_value1"
         })
 
-      vm2 = VersionManager.apply_transactions(state2.version_manager, [tx2])
+      vm2 = VersionManager.apply_transactions(state2.version_manager, [tx2], state2.database)
 
       # Persist new data
       after_page = Page.new(2, [{"after:recovery", v2}])
@@ -766,7 +770,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "wait:key1" => "value1"
         })
 
-      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1], state.database)
       state1 = %{state | version_manager: vm1}
 
       # Request for future version should be waitlisted or return error
@@ -775,7 +779,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
         {:error, :version_too_new} ->
           # This is the expected result when version is too new
           # For integration testing, we'll simulate what the server does
-          reply_fn = fn _result -> :ok end
+          test_pid = self()
+          reply_fn = fn result -> send(test_pid, {:waitlist_result, result}) end
           updated_state = Logic.add_to_waitlist(state1, {"wait:key1", future_v}, future_v, reply_fn, 5000)
 
           # Should be waitlisted
@@ -789,24 +794,37 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
               "wait:key1" => "future_value"
             })
 
-          vm2 = VersionManager.apply_transactions(updated_state.version_manager, [tx2])
+          vm2 = VersionManager.apply_transactions(updated_state.version_manager, [tx2], updated_state.database)
 
-          # Simulate notification of waiting fetches
           final_state = Logic.notify_waiting_fetches(%{updated_state | version_manager: vm2}, v2)
-
-          # Should have notified the waiting fetch - verify map is actually empty
           assert final_state.waiting_fetches == %{}
 
+          Enum.each(final_state.active_tasks, fn pid ->
+            ref = Process.monitor(pid)
+
+            receive do
+              {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+            after
+              5000 ->
+                flunk("Task #{inspect(pid)} did not complete within 5 seconds")
+            end
+          end)
+
+          receive do
+            {:waitlist_result, {:ok, "future_value"}} -> :ok
+            {:waitlist_result, result} -> flunk("Unexpected result: #{inspect(result)}")
+          after
+            5000 ->
+              flunk("Did not receive waitlist result within 5 seconds")
+          end
+
         {:ok, _value} ->
-          # If found immediately, that's also acceptable for MVP
           :ok
 
         {:error, :not_found} ->
-          # Future version returns not found - acceptable for MVP
           :ok
 
         {:error, :version_too_old} ->
-          # Version too old - acceptable for MVP (window management)
           :ok
       end
 
@@ -826,7 +844,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           "nowait:key1" => "value1"
         })
 
-      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1])
+      vm1 = VersionManager.apply_transactions(state.version_manager, [tx1], state.database)
       state1 = %{state | version_manager: vm1}
 
       # Request for future version without wait_ms should return error immediately
@@ -845,7 +863,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
           :ok
 
         {:error, :version_too_old} ->
-          # Version too old - acceptable for MVP (window management)
           :ok
       end
 
@@ -871,7 +888,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
       # Apply all transactions sequentially
       applied_versions =
         Enum.reduce(operations, {state.version_manager, []}, fn {_version, _key, _value, tx}, {vm_acc, versions_acc} ->
-          updated_vm = VersionManager.apply_transactions(vm_acc, [tx])
+          updated_vm = VersionManager.apply_transactions(vm_acc, [tx], state.database)
           applied_version = updated_vm.current_version
           {updated_vm, [applied_version | versions_acc]}
         end)
@@ -917,7 +934,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IntegrationTest do
 
           # Create transaction manually since we need specific version timestamps
           tx = TransactionTestSupport.new_log_transaction(Version.to_integer(version), %{key => value})
-          updated_vm = VersionManager.apply_transactions(vm_acc, [tx])
+          updated_vm = VersionManager.apply_transactions(vm_acc, [tx], state.database)
           updated_vm
         end)
 

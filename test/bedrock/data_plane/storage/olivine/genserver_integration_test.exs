@@ -71,6 +71,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.GenServerIntegrationTest do
 
     @tag :tmp_dir
     test "GenServer handles init failure gracefully", %{tmp_dir: _tmp_dir} do
+      import ExUnit.CaptureLog
+
       worker_id = random_id()
       otp_name = :"olivine_fail_init_#{System.unique_integer([:positive])}"
 
@@ -78,16 +80,18 @@ defmodule Bedrock.DataPlane.Storage.Olivine.GenServerIntegrationTest do
 
       init_args = {otp_name, self(), worker_id, invalid_path}
 
-      result = GenServer.start(Olivine.Server, init_args, name: otp_name)
+      capture_log(fn ->
+        result = GenServer.start(Olivine.Server, init_args, name: otp_name)
 
-      case result do
-        {:error, _reason} ->
-          :ok
+        case result do
+          {:error, _reason} ->
+            :ok
 
-        {:ok, pid} ->
-          ref = Process.monitor(pid)
-          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, @timeout
-      end
+          {:ok, pid} ->
+            ref = Process.monitor(pid)
+            assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, @timeout
+        end
+      end)
     end
 
     @tag :tmp_dir
@@ -745,7 +749,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.GenServerIntegrationTest do
       send(pid, {:transactions_applied, :invalid_version})
 
       # Process should survive
-      Process.sleep(10)
+      Process.sleep(3)
       assert Process.alive?(pid)
 
       # Should still be functional

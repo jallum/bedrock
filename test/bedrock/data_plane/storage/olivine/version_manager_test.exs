@@ -1,6 +1,7 @@
 defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   use ExUnit.Case, async: true
 
+  alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
@@ -8,6 +9,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
   alias Bedrock.DataPlane.Version
 
   # Helper functions for cleaner test assertions
+
+  # Helper function to create a test database for unit tests
+  defp create_test_database do
+    tmp_dir = System.tmp_dir!()
+    db_file = Path.join(tmp_dir, "test_db_#{System.unique_integer([:positive])}.dets")
+    table_name = String.to_atom("test_db_#{System.unique_integer([:positive])}")
+    {:ok, database} = Database.open(table_name, db_file)
+    database
+  end
 
   # Helper function to assert key-version pairs using the new tuple-based API
   defp assert_key_versions_equal(page, expected_key_version_pairs) do
@@ -35,7 +45,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert vm.max_page_id == 0
       assert vm.free_page_ids == []
       assert vm.current_version == Version.zero()
-      assert vm.durable_version == Version.zero()
     end
 
     test "close/1 properly cleans up ETS table" do
@@ -340,52 +349,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
     end
   end
 
-  describe "value lookup operations" do
-    test "fetch_value/3 returns values from lookaside buffer for recent versions" do
-      vm = VersionManager.new()
-
-      # Simulate some transactions to populate lookaside buffer
-      mutation1 = {:set, <<"key1">>, <<"value1">>}
-      mutation2 = {:set, <<"key2">>, <<"value2">>}
-      transaction = test_transaction([mutation1, mutation2], Version.from_integer(1000))
-
-      vm_updated = VersionManager.apply_transactions(vm, [transaction])
-
-      # Values should be found in lookaside buffer
-      assert {:ok, <<"value1">>} = VersionManager.fetch_value(vm_updated, <<"key1">>, Version.from_integer(1000))
-      assert {:ok, <<"value2">>} = VersionManager.fetch_value(vm_updated, <<"key2">>, Version.from_integer(1000))
-
-      # Non-existent keys should return not_found
-      assert {:error, :not_found} = VersionManager.fetch_value(vm_updated, <<"missing">>, Version.from_integer(1000))
-    end
-
-    test "fetch_value/3 returns check_database for durable versions" do
-      vm = VersionManager.new()
-
-      # Trying to fetch at durable version should signal check_database
-      assert {:error, :check_database} = VersionManager.fetch_value(vm, <<"key1">>, Version.zero())
-    end
-
-    test "value_loader/1 creates minimal function for async operations" do
-      vm = VersionManager.new()
-
-      # Add some data
-      mutation = {:set, <<"key1">>, <<"value1">>}
-      transaction = test_transaction([mutation], Version.from_integer(1000))
-      vm_updated = VersionManager.apply_transactions(vm, [transaction])
-
-      loader_fn = VersionManager.value_loader(vm_updated)
-
-      # Function should work independently
-      assert {:ok, <<"value1">>} = loader_fn.(<<"key1">>, Version.from_integer(1000))
-      assert {:error, :not_found} = loader_fn.(<<"missing">>, Version.from_integer(1000))
-      assert {:error, :check_database} = loader_fn.(<<"key1">>, Version.zero())
-    end
-  end
-
   describe "page-based key operations" do
     test "fetch_page_for_key/3 retrieves pages containing keys" do
       vm = VersionManager.new()
+      db = create_test_database()
 
       # Add some keys to create page structure
       mutations = [
@@ -395,7 +362,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       ]
 
       transaction = test_transaction(mutations, Version.from_integer(1000))
-      vm_updated = VersionManager.apply_transactions(vm, [transaction])
+      vm_updated = VersionManager.apply_transactions(vm, [transaction], db)
 
       # Should be able to fetch page containing key
       assert {:ok, page} = VersionManager.fetch_page_for_key(vm_updated, <<"banana">>, Version.from_integer(1000))
@@ -404,15 +371,18 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       # Should work for any key in the page
       assert {:ok, _page} = VersionManager.fetch_page_for_key(vm_updated, <<"apple">>, Version.from_integer(1000))
       assert {:ok, _page} = VersionManager.fetch_page_for_key(vm_updated, <<"cherry">>, Version.from_integer(1000))
+
+      Database.close(db)
     end
 
     test "fetch_page_for_key/3 handles version bounds correctly" do
       vm = VersionManager.new()
+      db = create_test_database()
 
       # Add data at version 1000
       mutation = {:set, <<"key1">>, <<"value1">>}
       transaction = test_transaction([mutation], Version.from_integer(1000))
-      vm_updated = VersionManager.apply_transactions(vm, [transaction])
+      vm_updated = VersionManager.apply_transactions(vm, [transaction], db)
 
       # Should work at current version
       assert {:ok, _page} = VersionManager.fetch_page_for_key(vm_updated, <<"key1">>, Version.from_integer(1000))
@@ -421,14 +391,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       assert {:error, :version_too_new} =
                VersionManager.fetch_page_for_key(vm_updated, <<"key1">>, Version.from_integer(2000))
 
-      # Should reject past versions (older than durable)
-      # In this case durable_version is still 0, so anything less should be rejected
-      # But since our current version is 1000, version 0 is not "too old" in this context
-      # The "too old" check is against durable version, not current version
+      # Note: version_too_old check was removed since VersionManager no longer tracks durable_version
+
+      Database.close(db)
     end
 
     test "fetch_pages_for_range/4 retrieves all pages in key range" do
       vm = VersionManager.new()
+      db = create_test_database()
 
       # Add many keys to potentially span multiple pages
       mutations =
@@ -439,7 +409,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
         end
 
       transaction = test_transaction(mutations, Version.from_integer(1000))
-      vm_updated = VersionManager.apply_transactions(vm, [transaction])
+      vm_updated = VersionManager.apply_transactions(vm, [transaction], db)
 
       # Fetch pages for a range
       start_key = <<"key_010">>
@@ -457,12 +427,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
       # Should find keys in the range
       assert length(range_keys) > 0
+
+      Database.close(db)
     end
   end
 
   describe "transaction processing" do
     test "apply_single_transaction/2 processes set mutations" do
       vm = VersionManager.new()
+      database = create_test_database()
 
       mutations = [
         {:set, <<"key1">>, <<"value1">>},
@@ -471,18 +444,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
       transaction = test_transaction(mutations, Version.from_integer(1000))
 
-      vm_updated = VersionManager.apply_single_transaction(transaction, vm)
+      vm_updated = VersionManager.apply_single_transaction(transaction, vm, database)
 
       # Version should be updated
       assert vm_updated.current_version == Version.from_integer(1000)
 
-      # Values should be in lookaside buffer
-      assert {:ok, <<"value1">>} = VersionManager.fetch_value(vm_updated, <<"key1">>, Version.from_integer(1000))
-      assert {:ok, <<"value2">>} = VersionManager.fetch_value(vm_updated, <<"key2">>, Version.from_integer(1000))
+      Database.close(database)
     end
 
     test "apply_single_transaction/2 processes clear mutations" do
       vm = VersionManager.new()
+      database = create_test_database()
 
       # First add some data
       set_mutations = [
@@ -492,7 +464,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       ]
 
       set_transaction = test_transaction(set_mutations, Version.from_integer(1000))
-      vm_with_data = VersionManager.apply_single_transaction(set_transaction, vm)
+      vm_with_data = VersionManager.apply_single_transaction(set_transaction, vm, database)
 
       # Then clear one key
       clear_mutations = [
@@ -500,7 +472,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       ]
 
       clear_transaction = test_transaction(clear_mutations, Version.from_integer(1100))
-      vm_after_clear = VersionManager.apply_single_transaction(clear_transaction, vm_with_data)
+      vm_after_clear = VersionManager.apply_single_transaction(clear_transaction, vm_with_data, database)
 
       # Key1 and Key3 should still be fetchable at version 1000
       assert {:ok, _page} = VersionManager.fetch_page_for_key(vm_after_clear, <<"key1">>, Version.from_integer(1000))
@@ -516,10 +488,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
           # Or the page itself might not exist if it was emptied
           :ok
       end
+
+      Database.close(database)
     end
 
     test "apply_single_transaction/2 processes clear_range mutations" do
       vm = VersionManager.new()
+      database = create_test_database()
 
       # Add data across a range
       set_mutations =
@@ -530,7 +505,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
         end
 
       set_transaction = test_transaction(set_mutations, Version.from_integer(1000))
-      vm_with_data = VersionManager.apply_single_transaction(set_transaction, vm)
+      vm_with_data = VersionManager.apply_single_transaction(set_transaction, vm, database)
 
       # Clear a range
       clear_mutations = [
@@ -538,7 +513,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       ]
 
       clear_transaction = test_transaction(clear_mutations, Version.from_integer(1100))
-      vm_after_clear = VersionManager.apply_single_transaction(clear_transaction, vm_with_data)
+      vm_after_clear = VersionManager.apply_single_transaction(clear_transaction, vm_with_data, database)
 
       # Keys outside the range should still be accessible
       assert {:ok, _page} = VersionManager.fetch_page_for_key(vm_after_clear, <<"key_01">>, Version.from_integer(1100))
@@ -558,24 +533,26 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
             :ok
         end
       end
+
+      Database.close(database)
     end
 
     test "apply_transactions/2 processes multiple transactions in sequence" do
       vm = VersionManager.new()
+      db = create_test_database()
 
       transaction1 = test_transaction([{:set, <<"key1">>, <<"value1">>}], Version.from_integer(1000))
       transaction2 = test_transaction([{:set, <<"key2">>, <<"value2">>}], Version.from_integer(1100))
       transaction3 = test_transaction([{:set, <<"key3">>, <<"value3">>}], Version.from_integer(1200))
 
-      vm_updated = VersionManager.apply_transactions(vm, [transaction1, transaction2, transaction3])
+      vm_updated = VersionManager.apply_transactions(vm, [transaction1, transaction2, transaction3], db)
 
       # Current version should be the latest
       assert vm_updated.current_version == Version.from_integer(1200)
 
-      # All values should be accessible
-      assert {:ok, <<"value1">>} = VersionManager.fetch_value(vm_updated, <<"key1">>, Version.from_integer(1000))
-      assert {:ok, <<"value2">>} = VersionManager.fetch_value(vm_updated, <<"key2">>, Version.from_integer(1100))
-      assert {:ok, <<"value3">>} = VersionManager.fetch_value(vm_updated, <<"key3">>, Version.from_integer(1200))
+      # Note: Value access testing moved to Database tests since VersionManager no longer handles values
+
+      Database.close(db)
     end
   end
 
@@ -639,6 +616,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
 
     test "tree operations work with page updates" do
       vm = VersionManager.new()
+      database = create_test_database()
 
       # Add some data to build tree structure
       mutations = [
@@ -648,79 +626,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerTest do
       ]
 
       transaction = test_transaction(mutations, Version.from_integer(1000))
-      vm_updated = VersionManager.apply_transactions(vm, [transaction])
+      vm_updated = VersionManager.apply_transactions(vm, [transaction], database)
 
       _tree = VersionManager.get_current_tree(vm_updated)
 
       # Tree should be able to find pages for keys
       # This is tested indirectly through fetch_page_for_key working
       assert {:ok, _page} = VersionManager.fetch_page_for_key(vm_updated, <<"banana">>, Version.from_integer(1000))
-    end
-  end
 
-  describe "lookaside buffer operations" do
-    test "get_version_entries/2 retrieves all entries for a version" do
-      vm = VersionManager.new()
-
-      mutations = [
-        {:set, <<"key1">>, <<"value1">>},
-        {:set, <<"key2">>, <<"value2">>}
-      ]
-
-      transaction = test_transaction(mutations, Version.from_integer(1000))
-      vm_updated = VersionManager.apply_single_transaction(transaction, vm)
-
-      entries = VersionManager.get_version_entries(vm_updated, Version.from_integer(1000))
-
-      assert length(entries) == 2
-      assert {<<"key1">>, <<"value1">>} in entries
-      assert {<<"key2">>, <<"value2">>} in entries
-    end
-
-    test "get_version_range_entries/3 retrieves entries across version range" do
-      vm = VersionManager.new()
-
-      transaction1 = test_transaction([{:set, <<"key1">>, <<"value1">>}], Version.from_integer(1000))
-      transaction2 = test_transaction([{:set, <<"key2">>, <<"value2">>}], Version.from_integer(1100))
-      transaction3 = test_transaction([{:set, <<"key3">>, <<"value3">>}], Version.from_integer(1200))
-
-      vm_updated = VersionManager.apply_transactions(vm, [transaction1, transaction2, transaction3])
-
-      # Get entries in range 1000-1150
-      entries =
-        VersionManager.get_version_range_entries(
-          vm_updated,
-          Version.from_integer(1000),
-          Version.from_integer(1150)
-        )
-
-      assert length(entries) == 2
-
-      # Should include entries from versions 1000 and 1100, but not 1200
-      versions = Enum.map(entries, fn {version, _key, _value} -> version end)
-      assert Version.from_integer(1000) in versions
-      assert Version.from_integer(1100) in versions
-      refute Version.from_integer(1200) in versions
-    end
-
-    test "remove_version_entries/2 cleans up specific version" do
-      vm = VersionManager.new()
-
-      transaction1 = test_transaction([{:set, <<"key1">>, <<"value1">>}], Version.from_integer(1000))
-      transaction2 = test_transaction([{:set, <<"key2">>, <<"value2">>}], Version.from_integer(1100))
-
-      vm_updated = VersionManager.apply_transactions(vm, [transaction1, transaction2])
-
-      # Remove version 1000 entries
-      :ok = VersionManager.remove_version_entries(vm_updated, Version.from_integer(1000))
-
-      # Version 1000 entries should be gone
-      entries_1000 = VersionManager.get_version_entries(vm_updated, Version.from_integer(1000))
-      assert entries_1000 == []
-
-      # Version 1100 entries should remain
-      entries_1100 = VersionManager.get_version_entries(vm_updated, Version.from_integer(1100))
-      assert length(entries_1100) == 1
+      Database.close(database)
     end
   end
 

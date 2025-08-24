@@ -85,4 +85,53 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Telemetry do
       reason: reason
     })
   end
+
+  @spec trace_shutdown_start(atom(), term()) :: :ok
+  def trace_shutdown_start(otp_name, reason) do
+    Telemetry.execute([:olivine, :shutdown, :start], %{}, %{
+      otp_name: otp_name,
+      reason: reason
+    })
+  end
+
+  @spec trace_shutdown_waiting(atom(), non_neg_integer()) :: :ok
+  def trace_shutdown_waiting(otp_name, active_task_count) do
+    Telemetry.execute([:olivine, :shutdown, :waiting], %{active_task_count: active_task_count}, %{
+      otp_name: otp_name
+    })
+  end
+
+  @spec trace_shutdown_timeout(non_neg_integer()) :: :ok
+  def trace_shutdown_timeout(remaining_tasks) do
+    Telemetry.execute([:olivine, :shutdown, :timeout], %{remaining_tasks: remaining_tasks}, %{})
+  end
+
+  @spec trace_shutdown_complete(atom()) :: :ok
+  def trace_shutdown_complete(otp_name) do
+    Telemetry.execute([:olivine, :shutdown, :complete], %{}, %{
+      otp_name: otp_name
+    })
+  end
+
+  @spec trace_startup_start(atom()) :: :ok
+  def trace_startup_start(otp_name) do
+    Telemetry.execute([:olivine, :startup, :start], %{}, %{
+      otp_name: otp_name
+    })
+  end
+
+  @spec trace_startup_failed(atom(), term()) :: :ok
+  def trace_startup_failed(otp_name, reason) do
+    Telemetry.execute([:olivine, :startup, :failed], %{}, %{
+      otp_name: otp_name,
+      reason: reason
+    })
+  end
+
+  @spec trace_startup_complete(atom()) :: :ok
+  def trace_startup_complete(otp_name) do
+    Telemetry.execute([:olivine, :startup, :complete], %{}, %{
+      otp_name: otp_name
+    })
+  end
 end

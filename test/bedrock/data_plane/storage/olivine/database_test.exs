@@ -2,6 +2,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
   use ExUnit.Case, async: true
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
+  alias Bedrock.DataPlane.Version
 
   defp with_db(context, file_name, table_name) do
     tmp_dir = context[:tmp_dir] || raise "tmp_dir not available in context"
@@ -234,6 +235,220 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
 
       {:ok, page} = Database.load_page(db, 42)
       assert page == <<"page_42">>
+    end
+  end
+
+  describe "unified value operations" do
+    setup context, do: with_db(context, "unified_values.dets", :unified_test)
+
+    @tag :tmp_dir
+    test "fetch_value/3 returns values from lookaside buffer for recent versions", %{db: db} do
+      key = <<"test_key">>
+      value = <<"test_value">>
+      version = Version.from_integer(1000)
+
+      # Store value in lookaside buffer
+      :ok = Database.store_value(db, key, version, value)
+
+      # Should be able to fetch it
+      assert {:ok, ^value} = Database.fetch_value(db, key, version)
+    end
+
+    @tag :tmp_dir
+    test "fetch_value/3 returns values from DETS for durable versions", %{db: db} do
+      key = <<"durable_key">>
+      value = <<"durable_value">>
+
+      # Store directly in DETS (simulating durable storage)
+      :ok = Database.store_value(db, key, value)
+
+      # Should be able to fetch from DETS storage
+      assert {:ok, ^value} = Database.fetch_value(db, key, Version.zero())
+    end
+
+    @tag :tmp_dir
+    test "fetch_value/3 routes correctly based on durable version", %{db: db} do
+      key = <<"routing_key">>
+      hot_value = <<"hot_value">>
+      cold_value = <<"cold_value">>
+
+      # Store cold value in DETS
+      :ok = Database.store_value(db, key, cold_value)
+
+      # Store hot value in lookaside buffer (version higher than durable)
+      hot_version = Version.from_integer(2000)
+      :ok = Database.store_value(db, key, hot_version, hot_value)
+
+      # Fetch at durable version should get cold value
+      assert {:ok, ^cold_value} = Database.fetch_value(db, key, Version.zero())
+
+      # Fetch at hot version should get hot value
+      assert {:ok, ^hot_value} = Database.fetch_value(db, key, hot_version)
+    end
+
+    @tag :tmp_dir
+    test "store_value/4 handles version-specific storage", %{db: db} do
+      key = <<"versioned_key">>
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(2000)
+
+      :ok = Database.store_value(db, key, version1, <<"value1">>)
+      :ok = Database.store_value(db, key, version2, <<"value2">>)
+
+      assert {:ok, <<"value1">>} = Database.fetch_value(db, key, version1)
+      assert {:ok, <<"value2">>} = Database.fetch_value(db, key, version2)
+    end
+
+    @tag :tmp_dir
+    test "store_value/4 prevents duplicate entries", %{db: db} do
+      key = <<"dup_key">>
+      version = Version.from_integer(1000)
+
+      :ok = Database.store_value(db, key, version, <<"first">>)
+      {:error, :already_exists} = Database.store_value(db, key, version, <<"second">>)
+
+      # Should still have the first value
+      assert {:ok, <<"first">>} = Database.fetch_value(db, key, version)
+    end
+  end
+
+  describe "lookaside buffer operations" do
+    setup context, do: with_db(context, "lookaside.dets", :lookaside_test)
+
+    @tag :tmp_dir
+    test "get_version_entries/2 retrieves all entries for a version", %{db: db} do
+      version = Version.from_integer(1000)
+
+      :ok = Database.store_value(db, <<"key1">>, version, <<"value1">>)
+      :ok = Database.store_value(db, <<"key2">>, version, <<"value2">>)
+
+      entries = Database.get_version_entries(db, version)
+
+      assert length(entries) == 2
+      assert {<<"key1">>, <<"value1">>} in entries
+      assert {<<"key2">>, <<"value2">>} in entries
+    end
+
+    @tag :tmp_dir
+    test "get_version_entries/2 returns empty list for unused version", %{db: db} do
+      unused_version = Version.from_integer(9999)
+      entries = Database.get_version_entries(db, unused_version)
+      assert entries == []
+    end
+
+    @tag :tmp_dir
+    test "remove_version_entries/2 removes all entries for a version", %{db: db} do
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(1100)
+
+      :ok = Database.store_value(db, <<"key1">>, version1, <<"value1">>)
+      :ok = Database.store_value(db, <<"key2">>, version1, <<"value2">>)
+      :ok = Database.store_value(db, <<"key3">>, version2, <<"value3">>)
+
+      # Remove version 1000 entries
+      :ok = Database.remove_version_entries(db, version1)
+
+      # Version 1000 entries should be gone
+      entries_1000 = Database.get_version_entries(db, version1)
+      assert entries_1000 == []
+
+      # Version 1100 entries should remain
+      entries_1100 = Database.get_version_entries(db, version2)
+      assert length(entries_1100) == 1
+      assert {<<"key3">>, <<"value3">>} in entries_1100
+    end
+
+    @tag :tmp_dir
+    test "cleanup_lookaside_buffer/2 removes entries older than durable version", %{db: db} do
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(2000)
+      version3 = Version.from_integer(3000)
+
+      :ok = Database.store_value(db, <<"key1">>, version1, <<"value1">>)
+      :ok = Database.store_value(db, <<"key2">>, version2, <<"value2">>)
+      :ok = Database.store_value(db, <<"key3">>, version3, <<"value3">>)
+
+      # Clean up versions <= 2000
+      :ok = Database.cleanup_lookaside_buffer(db, version2)
+
+      # Versions 1000 and 2000 should be gone
+      assert Database.get_version_entries(db, version1) == []
+      assert Database.get_version_entries(db, version2) == []
+
+      # Version 3000 should remain
+      entries_3000 = Database.get_version_entries(db, version3)
+      assert length(entries_3000) == 1
+      assert {<<"key3">>, <<"value3">>} in entries_3000
+    end
+
+    @tag :tmp_dir
+    test "get_version_range_entries/3 retrieves entries within version range", %{db: db} do
+      version1 = Version.from_integer(1000)
+      version2 = Version.from_integer(2000)
+      version3 = Version.from_integer(3000)
+
+      :ok = Database.store_value(db, <<"key1">>, version1, <<"value1">>)
+      :ok = Database.store_value(db, <<"key2">>, version2, <<"value2">>)
+      :ok = Database.store_value(db, <<"key3">>, version3, <<"value3">>)
+
+      # Get entries between versions 1000 and 2500 (should include versions 1000 and 2000)
+      range_entries = Database.get_version_range_entries(db, version1, Version.from_integer(2500))
+
+      assert length(range_entries) == 2
+      assert {version1, <<"key1">>, <<"value1">>} in range_entries
+      assert {version2, <<"key2">>, <<"value2">>} in range_entries
+      refute {version3, <<"key3">>, <<"value3">>} in range_entries
+    end
+  end
+
+  describe "durable version management" do
+    setup context, do: with_db(context, "durable_version.dets", :durable_test)
+
+    @tag :tmp_dir
+    test "advance_durable_version/2 updates internal durable version", %{db: db} do
+      new_version = Version.from_integer(5000)
+      {:ok, updated_db} = Database.advance_durable_version(db, new_version)
+
+      {:ok, loaded_version} = Database.load_durable_version(updated_db)
+      assert loaded_version == new_version
+    end
+
+    @tag :tmp_dir
+    test "store_durable_version/2 persists and updates durable version", %{db: db} do
+      new_version = Version.from_integer(7000)
+      {:ok, updated_db} = Database.store_durable_version(db, new_version)
+
+      # Should be updated in memory
+      {:ok, loaded_version} = Database.load_durable_version(updated_db)
+      assert loaded_version == new_version
+    end
+  end
+
+  describe "value_loader function" do
+    setup context, do: with_db(context, "value_loader.dets", :value_loader_test)
+
+    @tag :tmp_dir
+    test "value_loader/1 creates function that can load values", %{db: db} do
+      key = <<"loader_key">>
+      hot_version = Version.from_integer(1000)
+      cold_version = Version.zero()
+
+      # Store hot value
+      :ok = Database.store_value(db, key, hot_version, <<"hot_value">>)
+      # Store cold value
+      :ok = Database.store_value(db, key, <<"cold_value">>)
+
+      # Create value loader
+      loader = Database.value_loader(db)
+
+      # Should load hot value for hot version
+      assert {:ok, <<"hot_value">>} = loader.(key, hot_version)
+
+      # Should load cold value for cold version
+      assert {:ok, <<"cold_value">>} = loader.(key, cold_version)
+
+      # Should return not_found for missing key
+      assert {:error, :not_found} = loader.(<<"missing">>, hot_version)
     end
   end
 end

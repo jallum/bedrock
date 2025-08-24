@@ -65,7 +65,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   def unlock_after_recovery(t, durable_version, %{logs: _logs, services: _services}) do
     with :ok <- VersionManager.purge_transactions_newer_than(t.version_manager, durable_version) do
       _apply_and_notify_fn = fn encoded_transactions ->
-        updated_vm = VersionManager.apply_transactions(t.version_manager, encoded_transactions)
+        updated_vm = VersionManager.apply_transactions(t.version_manager, encoded_transactions, t.database)
         version = updated_vm.current_version
         send(self(), {:transactions_applied, version})
         version
@@ -85,14 +85,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   When reply_fn is not provided, returns results synchronously (primarily for testing).
   """
   @spec fetch(State.t(), Bedrock.key(), Bedrock.version(), opts :: [reply_fn: function()]) ::
-          {:ok, binary()} | :ok | {:error, :not_found} | {:error, :version_too_old} | {:error, :version_too_new}
+          {:ok, binary()}
+          | {:ok, pid()}
+          | {:error, :not_found}
+          | {:error, :version_too_old}
+          | {:error, :version_too_new}
   def fetch(%State{} = t, key, version, opts \\ []) do
-    case VersionManager.fetch_page_for_key(t.version_manager, key, version) do
-      {:ok, page} ->
-        resolve_fetch_from_page(t, page, key, opts[:reply_fn])
-
-      error ->
-        error
+    t.version_manager
+    |> VersionManager.fetch_page_for_key(key, version)
+    |> case do
+      {:ok, page} -> resolve_fetch_from_page(t, page, key, opts[:reply_fn])
+      error -> error
     end
   end
 
@@ -109,9 +112,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
           Bedrock.version(),
           opts :: [reply_fn: function(), limit: pos_integer()]
         ) ::
-          {:ok, [{Bedrock.key(), Bedrock.value()}]} | :ok | {:error, :version_too_old} | {:error, :version_too_new}
+          {:ok, [{Bedrock.key(), Bedrock.value()}]}
+          | {:ok, pid()}
+          | {:error, :version_too_old}
+          | {:error, :version_too_new}
   def range_fetch(t, start_key, end_key, version, opts \\ []) do
-    case VersionManager.fetch_pages_for_range(t.version_manager, start_key, end_key, version) do
+    t.version_manager
+    |> VersionManager.fetch_pages_for_range(start_key, end_key, version)
+    |> case do
       {:ok, pages} ->
         resolve_range_from_pages(t, pages, start_key, end_key, opts)
 
@@ -130,48 +138,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   """
   @spec add_to_waitlist(State.t(), term(), Bedrock.version(), function(), pos_integer()) :: State.t()
   def add_to_waitlist(%State{} = t, fetch_request, version, reply_fn, timeout_in_ms) do
-    {new_waiting, _timeout} =
-      WaitingList.insert(
-        t.waiting_fetches,
-        version,
-        fetch_request,
-        reply_fn,
-        timeout_in_ms
-      )
-
+    {new_waiting, _timeout} = WaitingList.insert(t.waiting_fetches, version, fetch_request, reply_fn, timeout_in_ms)
     %{t | waiting_fetches: new_waiting}
   end
 
-  defp minimal_load_fn(t) do
-    vm_loader = VersionManager.value_loader(t.version_manager)
-    db_loader = Database.value_loader(t.database)
-
-    fn key, version ->
-      case vm_loader.(key, version) do
-        {:ok, value} ->
-          value
-
-        {:error, :check_database} ->
-          {:ok, value} = db_loader.(key)
-          value
-
-        {:error, :not_found} ->
-          raise "Key not found"
-      end
-    end
-  end
-
   defp resolve_fetch_from_page(t, page, key, reply_fn) do
-    load_fn = minimal_load_fn(t)
+    load_fn = Database.value_loader(t.database)
 
     if reply_fn do
-      Task.start(fn ->
-        page
-        |> resolve_fetch_from_page_with_loader(key, load_fn)
-        |> reply_fn.()
-      end)
+      {:ok, pid} =
+        Task.start(fn ->
+          page
+          |> resolve_fetch_from_page_with_loader(key, load_fn)
+          |> reply_fn.()
+        end)
 
-      :ok
+      {:ok, pid}
     else
       resolve_fetch_from_page_with_loader(page, key, load_fn)
     end
@@ -180,8 +162,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   defp resolve_fetch_from_page_with_loader(page, key, load_fn) do
     case Page.find_version_for_key(page, key) do
       {:ok, found_version} ->
-        result = load_fn.(key, found_version)
-        {:ok, result}
+        load_fn.(key, found_version)
 
       error ->
         error
@@ -189,16 +170,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   end
 
   defp resolve_range_from_pages(t, pages, start_key, end_key, opts) do
-    load_fn = minimal_load_fn(t)
+    load_fn = Database.value_loader(t.database)
 
     if reply_fn = opts[:reply_fn] do
-      Task.start(fn ->
-        pages
-        |> resolve_range_from_pages_with_loader(start_key, end_key, opts[:limit], load_fn)
-        |> reply_fn.()
-      end)
+      {:ok, pid} =
+        Task.start(fn ->
+          pages
+          |> resolve_range_from_pages_with_loader(start_key, end_key, opts[:limit], load_fn)
+          |> reply_fn.()
+        end)
 
-      :ok
+      {:ok, pid}
     else
       resolve_range_from_pages_with_loader(pages, start_key, end_key, opts[:limit], load_fn)
     end
@@ -210,7 +192,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
       |> Page.stream_key_versions_in_range(start_key, end_key)
       |> apply_limit(limit)
       |> Enum.map(fn {key, version} ->
-        value = load_fn.(key, version)
+        {:ok, value} = load_fn.(key, version)
         {key, value}
       end)
 
@@ -221,25 +203,37 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   def notify_waiting_fetches(%State{} = t, applied_version) do
     {new_waiting, fetches_to_run} = WaitingList.remove_all(t.waiting_fetches, applied_version)
 
-    Enum.each(fetches_to_run, fn
-      {_deadline, reply_fn, fetch_request} ->
-        run_fetch_and_notify(t, reply_fn, fetch_request)
-    end)
+    updated_state =
+      Enum.reduce(fetches_to_run, %{t | waiting_fetches: new_waiting}, fn
+        {_deadline, reply_fn, fetch_request}, acc_state ->
+          case run_fetch_and_notify(acc_state, reply_fn, fetch_request) do
+            {:ok, pid} -> State.add_active_task(acc_state, pid)
+            :ok -> acc_state
+          end
+      end)
 
-    %{t | waiting_fetches: new_waiting}
+    updated_state
   end
 
   defp run_fetch_and_notify(t, reply_fn, {key, version}) do
     case fetch(t, key, version, reply_fn: reply_fn) do
-      :ok -> :ok
-      error -> reply_fn.(error)
+      {:ok, pid} ->
+        {:ok, pid}
+
+      error ->
+        reply_fn.(error)
+        :ok
     end
   end
 
   defp run_fetch_and_notify(t, reply_fn, {start_key, end_key, version}) do
     case range_fetch(t, start_key, end_key, version, reply_fn: reply_fn) do
-      :ok -> :ok
-      error -> reply_fn.(error)
+      {:ok, pid} ->
+        {:ok, pid}
+
+      error ->
+        reply_fn.(error)
+        :ok
     end
   end
 
@@ -271,8 +265,16 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
       utilization
     ]a
 
-  defp gather_info(:oldest_durable_version, t), do: VersionManager.oldest_durable_version(t.version_manager)
-  defp gather_info(:durable_version, t), do: VersionManager.last_durable_version(t.version_manager)
+  defp gather_info(:oldest_durable_version, t) do
+    {:ok, version} = Database.load_durable_version(t.database)
+    version
+  end
+
+  defp gather_info(:durable_version, t) do
+    {:ok, version} = Database.load_durable_version(t.database)
+    version
+  end
+
   defp gather_info(:id, t), do: t.id
   defp gather_info(:key_ranges, t), do: VersionManager.info(t.version_manager, :key_ranges)
   defp gather_info(:kind, _t), do: :storage

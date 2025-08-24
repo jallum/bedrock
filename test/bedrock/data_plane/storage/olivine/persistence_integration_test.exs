@@ -40,7 +40,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert vm.max_page_id == 0
       assert vm.free_page_ids == []
       assert vm.current_version == Version.zero()
-      assert vm.durable_version == Version.zero()
+      assert {:ok, version} = Database.load_durable_version(state.database)
+      assert version == Version.zero()
 
       Logic.shutdown(state)
     end
@@ -443,9 +444,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
             {v2, {:gb_trees.empty(), %{}}},
             {v1, {:gb_trees.empty(), %{}}}
           ],
-          current_version: v3,
-          durable_version: v1
+          current_version: v3
       }
+
+      # Set durable version in database to v1 (the oldest)
+      {:ok, db} = Database.store_durable_version(db, v1)
 
       # Store some data for each version in DETS
       # Store values using new API (key, value) - versions not stored in DETS
@@ -480,7 +483,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert value3 == <<"value3">>
 
       # Durable version should be the oldest version (v1, since all are kept in MVP)
-      assert updated_vm.durable_version == v1
+      assert {:ok, version} = Database.load_durable_version(db)
+      assert version == v1
 
       VersionManager.close(updated_vm)
       Database.close(db)
@@ -503,8 +507,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
             {recent_version, {:gb_trees.empty(), %{}}},
             {old_version, {:gb_trees.empty(), %{}}}
           ],
-          current_version: recent_version,
-          durable_version: old_version
+          current_version: recent_version
       }
 
       # Store data before window advancement
@@ -555,8 +558,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
             {recent_version, {:gb_trees.empty(), %{}}},
             {old_version, {:gb_trees.empty(), %{}}}
           ],
-          current_version: recent_version,
-          durable_version: old_version
+          current_version: recent_version
       }
 
       # Advance version to trigger eviction
@@ -619,7 +621,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       # Version manager should start fresh (versions list will be different)
       # but persistent data remains accessible
       assert vm2.current_version == Version.zero()
-      assert vm2.durable_version == Version.zero()
+      assert {:ok, version} = Database.load_durable_version(db2)
+      assert version == Version.zero()
 
       VersionManager.close(vm2)
       Database.close(db2)

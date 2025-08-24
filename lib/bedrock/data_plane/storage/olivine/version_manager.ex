@@ -76,26 +76,20 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   @opaque t :: %__MODULE__{
             versions: [{Bedrock.version(), version_data()}],
             current_version: Bedrock.version(),
-            durable_version: Bedrock.version(),
             window_size_in_microseconds: pos_integer(),
-            lookaside_buffer: :ets.tab(),
             max_page_id: page_id(),
             free_page_ids: [page_id()]
           }
   defstruct [
     :versions,
     :current_version,
-    :durable_version,
     :window_size_in_microseconds,
-    :lookaside_buffer,
     :max_page_id,
     :free_page_ids
   ]
 
   @spec new() :: t()
   def new do
-    lookaside_buffer = :ets.new(:olivine_lookaside, [:ordered_set, :protected, {:read_concurrency, true}])
-
     initial_page_binary = Page.new(0, [])
     initial_tree = :gb_trees.empty()
     initial_page_map = %{0 => initial_page_binary}
@@ -111,9 +105,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     %__MODULE__{
       versions: [{Version.zero(), initial_version_data}],
       current_version: Version.zero(),
-      durable_version: Version.zero(),
       window_size_in_microseconds: 5_000_000,
-      lookaside_buffer: lookaside_buffer,
       max_page_id: 0,
       free_page_ids: []
     }
@@ -122,14 +114,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   @spec recover_from_database(database :: Database.t()) ::
           {:ok, t()} | {:error, :corrupted_page | :broken_chain | :cycle_detected}
   def recover_from_database(database) do
-    lookaside_buffer = :ets.new(:olivine_lookaside, [:ordered_set, :protected, {:read_concurrency, true}])
-
-    # Load the durable version from the database, or use zero version if none exists
-    durable_version =
-      case Database.load_durable_version(database) do
-        {:ok, version} -> version
-        {:error, :not_found} -> Version.zero()
-      end
+    # Get the durable version from the database
+    {:ok, durable_version} = Database.load_durable_version(database)
 
     # Traverse pages from page 0 to rebuild page structure and calculate metadata
     case load_and_rebuild_pages(database) do
@@ -154,9 +140,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
         version_manager = %__MODULE__{
           versions: [{durable_version, initial_version_data}],
           current_version: durable_version,
-          durable_version: durable_version,
           window_size_in_microseconds: 5_000_000,
-          lookaside_buffer: lookaside_buffer,
           max_page_id: max_page_id,
           free_page_ids: free_page_ids
         }
@@ -164,8 +148,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
         {:ok, version_manager}
 
       {:error, reason} when reason in [:corrupted_page, :broken_chain, :cycle_detected] ->
-        # Clean up the ETS table before returning error
-        :ets.delete(lookaside_buffer)
         {:error, reason}
     end
   end
@@ -235,77 +217,40 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   defp add_unique_page_id([h | t], id, acc), do: add_unique_page_id(t, id, [h | acc])
 
   @spec close(version_manager :: t()) :: :ok
-  def close(version_manager) do
-    :ets.delete(version_manager.lookaside_buffer)
+  def close(_version_manager) do
+    # No resources to clean up in VersionManager anymore
+    # Database handles its own cleanup
     :ok
   end
 
-  @spec fetch_value(t(), Bedrock.key(), Bedrock.version()) ::
-          {:ok, Bedrock.value()} | {:error, :not_found | :check_database}
-  def fetch_value(version_manager, key, version) do
-    if version > version_manager.durable_version do
-      # Look up in ETS lookaside buffer for recent versions
-      case :ets.lookup(version_manager.lookaside_buffer, {version, key}) do
-        [{_key_version, value}] -> {:ok, value}
-        [] -> {:error, :not_found}
-      end
-    else
-      # Signal that this should be loaded from database instead
-      {:error, :check_database}
-    end
-  end
-
-  @doc """
-  Returns a value loader function that captures only the minimal data needed
-  for async value resolution tasks. Avoids copying the entire VersionManager.
-  """
-  @spec value_loader(t()) :: (Bedrock.key(), Bedrock.version() ->
-                                {:ok, Bedrock.value()} | {:error, :not_found | :check_database})
-  def value_loader(version_manager) do
-    # Capture only the ETS reference and durable version
-    lookaside_buffer = version_manager.lookaside_buffer
-    durable_version = version_manager.durable_version
-
-    fn
-      key, version when version > durable_version ->
-        case :ets.lookup(lookaside_buffer, {version, key}) do
-          [{_key_version, value}] -> {:ok, value}
-          [] -> {:error, :not_found}
-        end
-
-      _, _ ->
-        {:error, :check_database}
-    end
-  end
-
-  @spec fetch_page_for_key(version_manager :: t(), key :: Bedrock.key(), version :: Bedrock.version()) ::
-          {:ok, Page.t()} | {:error, :not_found | :version_too_old | :version_too_new}
-  def fetch_page_for_key(version_manager, _key, version) when version < version_manager.durable_version,
-    do: {:error, :version_too_old}
-
+  @spec fetch_page_for_key(t(), key :: Bedrock.key(), Bedrock.version()) ::
+          {:ok, Page.t()}
+          | {:error, :not_found}
+          | {:error, :version_too_new}
   def fetch_page_for_key(version_manager, _key, version) when version_manager.current_version < version,
     do: {:error, :version_too_new}
 
   def fetch_page_for_key(version_manager, key, version) do
-    with %VersionData{tree: tree, page_map: page_map} <- find_best_version_for_fetch(version_manager.versions, version),
-         page_id when is_integer(page_id) <- Tree.page_for_key(tree, key) do
-      {:ok, Map.fetch!(page_map, page_id)}
-    else
-      nil -> {:error, :not_found}
+    version_manager.versions
+    |> find_best_version_for_fetch(version)
+    |> case do
+      nil ->
+        {:error, :version_too_old}
+
+      %VersionData{tree: tree, page_map: page_map} ->
+        tree
+        |> Tree.page_for_key(key)
+        |> case do
+          nil -> {:error, :not_found}
+          page_id -> {:ok, Map.fetch!(page_map, page_id)}
+        end
     end
   end
 
-  @spec fetch_pages_for_range(
-          version_manager :: t(),
-          start_key :: Bedrock.key(),
-          end_key :: Bedrock.key(),
-          version :: Bedrock.version()
-        ) ::
-          {:ok, [Page.t()]} | {:error, :version_too_old | :version_too_new}
-  def fetch_pages_for_range(version_manager, _start_key, _end_key, version)
-      when version < version_manager.durable_version,
-      do: {:error, :version_too_old}
-
+  @spec fetch_pages_for_range(t(), start_key :: Bedrock.key(), end_key :: Bedrock.key(), Bedrock.version()) ::
+          {:ok, [Page.t()]}
+          | {:error, :version_too_new}
+          | {:error, :version_too_old}
   def fetch_pages_for_range(version_manager, _start_key, _end_key, version)
       when version_manager.current_version < version,
       do: {:error, :version_too_new}
@@ -313,7 +258,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   def fetch_pages_for_range(version_manager, start_key, end_key, version) do
     case find_best_version_for_fetch(version_manager.versions, version) do
       nil ->
-        {:ok, []}
+        {:error, :version_too_old}
 
       %VersionData{tree: tree, page_map: page_map} ->
         pages =
@@ -325,11 +270,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     end
   end
 
-  @spec apply_transactions(version_manager :: t(), encoded_transactions :: [binary()]) :: t()
-  def apply_transactions(version_manager, []), do: version_manager
+  @spec apply_transactions(version_manager :: t(), encoded_transactions :: [binary()], database :: Database.t()) :: t()
+  def apply_transactions(version_manager, [], _database), do: version_manager
 
-  def apply_transactions(version_manager, transactions) when is_list(transactions),
-    do: Enum.reduce(transactions, version_manager, &apply_single_transaction/2)
+  def apply_transactions(version_manager, transactions, database) when is_list(transactions),
+    do:
+      Enum.reduce(transactions, version_manager, fn transaction, vm_acc ->
+        apply_single_transaction(transaction, vm_acc, database)
+      end)
 
   # Transaction Processing Functions (Phase 3.1)
 
@@ -337,27 +285,27 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   Applies a single transaction binary to the version manager.
   Creates a new version and applies all mutations in the transaction.
   """
-  @spec apply_single_transaction(binary(), t()) :: t()
-  def apply_single_transaction(transaction_binary, version_manager) do
+  @spec apply_single_transaction(binary(), t(), Database.t()) :: t()
+  def apply_single_transaction(transaction_binary, version_manager, database) do
     commit_version = Transaction.extract_commit_version!(transaction_binary)
 
     transaction_binary
     |> Transaction.stream_mutations!()
-    |> apply_mutations_to_version(commit_version, version_manager)
+    |> apply_mutations_to_version(commit_version, version_manager, database)
   end
 
   @doc """
   Applies mutations to create a new version state in the version manager.
   Uses a two-pass approach: first collect all instructions, then process each page.
   """
-  @spec apply_mutations_to_version(Enumerable.t(), Bedrock.version(), t()) :: t()
-  def apply_mutations_to_version(mutations, new_version, version_manager) do
+  @spec apply_mutations_to_version(Enumerable.t(), Bedrock.version(), t(), Database.t()) :: t()
+  def apply_mutations_to_version(mutations, new_version, version_manager, database) do
     current_page_data = get_current_page_data(version_manager)
 
     # Pass 1: Distribute instructions across pages
     page_data_with_instructions =
       Enum.reduce(mutations, current_page_data, fn mutation, page_data_acc ->
-        apply_single_mutation(version_manager, mutation, new_version, page_data_acc)
+        apply_single_mutation(version_manager, mutation, new_version, page_data_acc, database)
       end)
 
     # Pass 2: Process all pending operations for each modified page
@@ -368,11 +316,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     %{version_manager | versions: updated_versions, current_version: new_version}
   end
 
-  @spec apply_single_mutation(t(), Tx.mutation(), Bedrock.version(), version_data()) :: version_data()
-  def apply_single_mutation(version_manager, mutation, new_version, page_data) do
+  @spec apply_single_mutation(t(), Tx.mutation(), Bedrock.version(), version_data(), Database.t()) :: version_data()
+  def apply_single_mutation(version_manager, mutation, new_version, page_data, database) do
     case mutation do
       {:set, key, value} ->
-        apply_set_mutation(version_manager, key, value, new_version, page_data)
+        apply_set_mutation(version_manager, key, value, new_version, page_data, database)
 
       {:clear, key} ->
         apply_clear_mutation(version_manager, key, new_version, page_data)
@@ -382,12 +330,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     end
   end
 
-  @spec apply_set_mutation(t(), binary(), binary(), Bedrock.version(), version_data()) :: version_data()
-  defp apply_set_mutation(version_manager, key, value, new_version, %VersionData{} = page_data) do
+  @spec apply_set_mutation(t(), binary(), binary(), Bedrock.version(), version_data(), Database.t()) :: version_data()
+  defp apply_set_mutation(_version_manager, key, value, new_version, %VersionData{} = page_data, database) do
     target_page_id = Tree.page_for_insertion(page_data.tree, key)
 
-    # Store the value in lookaside buffer immediately
-    true = :ets.insert_new(version_manager.lookaside_buffer, {{new_version, key}, value})
+    # Store the value in database (handles lookaside buffer internally)
+    :ok = Database.store_value(database, key, new_version, value)
 
     # Add set operation to pending operations for this page (last-writer-wins)
     set_operation = {:set, new_version}
@@ -601,11 +549,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   @spec last_committed_version(version_manager :: t()) :: Bedrock.version()
   def last_committed_version(version_manager), do: version_manager.current_version
 
-  @spec last_durable_version(version_manager :: t()) :: Bedrock.version()
-  def last_durable_version(version_manager), do: version_manager.durable_version
+  # These functions are deprecated - durable version is now managed by Database
+  @spec last_durable_version(version_manager :: t()) :: nil
+  def last_durable_version(_version_manager), do: nil
 
-  @spec oldest_durable_version(version_manager :: t()) :: Bedrock.version()
-  def oldest_durable_version(version_manager), do: version_manager.durable_version
+  @spec oldest_durable_version(version_manager :: t()) :: nil
+  def oldest_durable_version(_version_manager), do: nil
 
   @spec purge_transactions_newer_than(version_manager :: t(), version :: Bedrock.version()) :: :ok
   def purge_transactions_newer_than(_version_manager, _version) do
@@ -657,7 +606,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   @spec persist_version_to_storage(version_manager :: t(), Database.t(), {Bedrock.version(), version_data()}) ::
           :ok | {:error, term()}
   def persist_version_to_storage(
-        version_manager,
+        _version_manager,
         database,
         {version, %VersionData{tree: tree, page_map: page_map, modified_page_ids: modified_page_ids}}
       ) do
@@ -666,10 +615,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
       |> Enum.map(&Map.fetch!(page_map, &1))
       |> persist_pages_batch(database)
 
-    ets_values_result =
-      version_manager.lookaside_buffer
-      |> extract_version_values(version)
-      |> persist_values_batch(database)
+    # Values are now managed by Database, so this is a no-op
+    ets_values_result = :ok
 
     tree_result = persist_tree_metadata(database, tree, version)
 
@@ -688,28 +635,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
         error -> {:halt, error}
       end
     end)
-  end
-
-  @spec extract_version_values(:ets.tid(), Bedrock.version()) :: [{Bedrock.key(), Bedrock.version(), Bedrock.value()}]
-  defp extract_version_values(ets_table, version) do
-    match_pattern = {{version, :"$1"}, :"$2"}
-
-    ets_table
-    |> :ets.match(match_pattern)
-    |> Enum.map(fn [key, value] -> {key, version, value} end)
-  end
-
-  @spec persist_values_batch([{Bedrock.key(), Bedrock.version(), Bedrock.value()}], Database.t()) ::
-          :ok | {:error, term()}
-  defp persist_values_batch([], _database), do: :ok
-
-  defp persist_values_batch(values, database) do
-    key_value_tuples =
-      Enum.map(values, fn {key, _version, value} ->
-        {key, value}
-      end)
-
-    Database.batch_store_values(database, key_value_tuples)
   end
 
   @spec persist_tree_metadata(Database.t(), :gb_trees.tree(), Bedrock.version()) :: :ok | {:error, term()}
@@ -737,9 +662,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
         with :ok <- Database.batch_persist_all(database, all_pages, all_values, new_durable_version),
              :ok <- Database.sync(database) do
-          :ok = cleanup_lookaside_buffer_for_versions(version_manager, versions_to_evict)
+          # Cleanup lookaside buffer is now handled by Database
+          # :ok = Database.cleanup_lookaside_buffer(database, new_durable_version)
 
-          updated_vm = %{version_manager | versions: versions_to_keep, durable_version: new_durable_version}
+          updated_vm = %{version_manager | versions: versions_to_keep}
 
           {:ok, updated_vm}
         end
@@ -749,9 +675,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   # Optimized helper function to collect all persistence data in one pass
   @spec collect_persistence_data(t(), [{Bedrock.version(), version_data()}]) ::
           {[{Database.page_id(), binary()}], [{Bedrock.key(), Bedrock.value()}]}
-  defp collect_persistence_data(version_manager, versions_to_evict) do
+  defp collect_persistence_data(_version_manager, versions_to_evict) do
     {pages_acc, values_acc} =
-      Enum.reduce(versions_to_evict, {[], []}, fn {version,
+      Enum.reduce(versions_to_evict, {[], []}, fn {_version,
                                                    %VersionData{
                                                      page_map: page_map,
                                                      modified_page_ids: modified_page_ids
@@ -763,7 +689,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
             {page_id, page_binary}
           end)
 
-        version_values = extract_version_values_optimized(version_manager.lookaside_buffer, version)
+        # Values are now managed by Database directly
+        version_values = []
 
         {pages_acc ++ version_pages, values_acc ++ version_values}
       end)
@@ -771,26 +698,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     {pages_acc, values_acc}
   end
 
-  # Optimized extraction that directly produces {key, value} tuples (no intermediate 3-tuples)
-  @spec extract_version_values_optimized(:ets.tid(), Bedrock.version()) :: [{Bedrock.key(), Bedrock.value()}]
-  defp extract_version_values_optimized(ets_table, version) do
-    match_pattern = {{version, :"$1"}, :"$2"}
-
-    ets_table
-    |> :ets.match(match_pattern)
-    |> Enum.map(fn [key, value] -> {key, value} end)
-  end
-
-  # Helper function using consolidation principles
-  @spec cleanup_lookaside_buffer_for_versions(t(), [{Bedrock.version(), version_data()}]) :: :ok
-  defp cleanup_lookaside_buffer_for_versions(version_manager, versions_to_evict) do
-    Enum.each(versions_to_evict, fn {version, _} ->
-      match_pattern = {{version, :_}, :_}
-      :ets.match_delete(version_manager.lookaside_buffer, match_pattern)
-    end)
-
-    :ok
-  end
+  # Lookaside buffer cleanup is now handled by Database module
 
   @spec next_id(version_manager :: t()) :: {page_id(), t()}
   def next_id(version_manager) do
@@ -878,30 +786,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   def advance_version(version_manager, new_version) do
     window_start_version = calculate_window_start(version_manager)
 
-    {versions_to_keep, versions_to_evict} = split_versions_at_window(version_manager.versions, window_start_version)
+    {versions_to_keep, _versions_to_evict} = split_versions_at_window(version_manager.versions, window_start_version)
 
     # Note: advance_version only manages in-memory version eviction
     # Persistence should be handled by advance_window_with_persistence before calling this function
     # This separation allows for proper error handling and transaction semantics
 
-    new_durable_version =
-      case versions_to_evict do
-        [] -> version_manager.durable_version
-        [{first_evicted_version, _} | _] -> first_evicted_version
-      end
-
-    updated_version_manager = %{
-      version_manager
-      | versions: versions_to_keep,
-        current_version: new_version,
-        durable_version: new_durable_version
-    }
-
-    if new_durable_version != version_manager.durable_version do
-      :ok = cleanup_lookaside_buffer(updated_version_manager, new_durable_version)
-    end
-
-    updated_version_manager
+    %{version_manager | versions: versions_to_keep, current_version: new_version}
   end
 
   # Helper Functions for MVCC Value Retrieval (Phase 3.2)
@@ -969,32 +860,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
   def get_current_tree(%__MODULE__{versions: [{_version, %VersionData{tree: tree}} | _]}), do: tree
 
-  @doc """
-  Removes all entries for a specific version from the lookaside buffer.
-  This is typically called after successfully flushing a version to persistent storage.
-  """
-  @spec remove_version_entries(t(), Bedrock.version()) :: :ok
-  def remove_version_entries(version_manager, target_version) do
-    buffer = version_manager.lookaside_buffer
-    match_pattern = {{target_version, :_}, :_}
-    :ets.match_delete(buffer, match_pattern)
-    :ok
-  end
-
-  @doc """
-  Efficiently removes all entries for versions older than or equal to the durable version.
-  This is a more efficient way to clean up the lookaside buffer when advancing the durable version.
-  Uses a single match_delete operation to remove all obsolete entries at once.
-  """
-  @spec cleanup_lookaside_buffer(t(), Bedrock.version()) :: :ok
-  def cleanup_lookaside_buffer(version_manager, durable_version) do
-    buffer = version_manager.lookaside_buffer
-    match_pattern = {{:"$1", :_}, :_}
-    guard_condition = {:"=<", :"$1", durable_version}
-    match_spec = [{match_pattern, [guard_condition], [true]}]
-    :ets.select_delete(buffer, match_spec)
-    :ok
-  end
+  # Lookaside buffer management functions have been moved to Database module
 
   @doc """
   Gets the current complete page_data tuple from the version manager.
@@ -1010,35 +876,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
       [{_version, page_data} | _] ->
         page_data
     end
-  end
-
-  @doc """
-  Retrieves all entries for a specific version from the lookaside buffer.
-  Returns a list of {key, value} tuples for the given version.
-  This function is primarily used for testing lookaside buffer functionality.
-  """
-  @spec get_version_entries(t(), Bedrock.version()) :: [{Bedrock.key(), Bedrock.value()}]
-  def get_version_entries(version_manager, version) do
-    match_pattern = {{version, :"$1"}, :"$2"}
-
-    version_manager.lookaside_buffer
-    |> :ets.match(match_pattern)
-    |> Enum.map(fn [key, value] -> {key, value} end)
-  end
-
-  @doc """
-  Retrieves entries for a range of versions from the lookaside buffer.
-  Returns a list of {version, key, value} tuples for versions within the specified range (inclusive).
-  This function is primarily used for testing lookaside buffer functionality.
-  """
-  @spec get_version_range_entries(t(), Bedrock.version(), Bedrock.version()) ::
-          [{Bedrock.version(), Bedrock.key(), Bedrock.value()}]
-  def get_version_range_entries(version_manager, start_version, end_version) do
-    match_pattern = {{:"$1", :"$2"}, :"$3"}
-    guard_condition = {:andalso, {:>=, :"$1", start_version}, {:"=<", :"$1", end_version}}
-    match_spec = [{match_pattern, [guard_condition], [{{:"$1", :"$2", :"$3"}}]}]
-
-    :ets.select(version_manager.lookaside_buffer, match_spec)
   end
 
   # Page management functions moved from Page module
