@@ -353,4 +353,162 @@ defmodule Bedrock.DataPlane.Storage.Olivine.DatabaseTest do
       assert {:error, :not_found} = loader.(<<"missing">>, hot_version)
     end
   end
+
+  describe "persistence optimization" do
+    setup context, do: with_db(context, "persistence.dets", :persistence_test)
+
+    @tag :tmp_dir
+    test "build_dets_tx/2 deduplicates overlapping versions", %{db: db} do
+      # Set up test versions
+      v1 = Version.from_integer(100)
+      v2 = Version.from_integer(200)
+      v3 = Version.from_integer(300)
+
+      # Store overlapping data in lookaside buffer
+      # Same key in multiple versions - should keep newest
+      :ok = Database.store_value(db, <<"key1">>, v1, <<"value1_old">>)
+      :ok = Database.store_value(db, <<"key1">>, v2, <<"value1_new">>)
+
+      # Different keys
+      :ok = Database.store_value(db, <<"key2">>, v1, <<"value2">>)
+      :ok = Database.store_value(db, <<"key3">>, v3, <<"value3">>)
+
+      # Store overlapping pages
+      :ok = Database.store_page_version(db, 42, v1, <<"page42_old">>)
+      :ok = Database.store_page_version(db, 42, v2, <<"page42_new">>)
+      :ok = Database.store_page_version(db, 43, v1, <<"page43">>)
+
+      # Build DETS transaction data for v2 and below
+      result = Database.build_dets_tx(db, v2)
+
+      # Should start with durable_version entry
+      assert [{:durable_version, ^v2} | data] = result
+
+      # Convert remaining data to maps for easier testing
+      {pages, values} =
+        Enum.split_with(data, fn {key, _value} -> is_integer(key) end)
+
+      pages_map = Map.new(pages)
+      values_map = Map.new(values)
+
+      # Should have newest values only
+      assert values_map == %{
+               # newest version wins
+               <<"key1">> => <<"value1_new">>,
+               # only version
+               <<"key2">> => <<"value2">>
+             }
+
+      # Should have newest pages only
+      assert pages_map == %{
+               # newest version wins
+               42 => <<"page42_new">>,
+               # only version
+               43 => <<"page43">>
+             }
+
+      # Should not include v3 data (beyond cutoff)
+      refute Map.has_key?(values_map, <<"key3">>)
+    end
+
+    @tag :tmp_dir
+    test "build_dets_tx/2 handles empty lookaside buffer", %{db: db} do
+      v1 = Version.from_integer(100)
+      result = Database.build_dets_tx(db, v1)
+      # Should only contain the durable_version entry
+      assert result == [{:durable_version, v1}]
+    end
+
+    @tag :tmp_dir
+    test "advance_durable_version/3 persists and updates durable version", %{db: db} do
+      # Set up initial durable version
+      initial_version = Version.zero()
+      {:ok, db} = Database.store_durable_version(db, initial_version)
+
+      # Set up test versions and data
+      v1 = Version.from_integer(100)
+      v2 = Version.from_integer(200)
+
+      # Store data in lookaside buffer
+      :ok = Database.store_value(db, <<"key1">>, v1, <<"value1">>)
+      :ok = Database.store_value(db, <<"key2">>, v2, <<"value2">>)
+      :ok = Database.store_page_version(db, 42, v1, <<"page42">>)
+
+      # Advance durable version to v2
+      {:ok, updated_db} = Database.advance_durable_version(db, v2, [v1, v2])
+
+      # Verify durable version was updated
+      assert updated_db.durable_version == v2
+
+      # Verify data was persisted to DETS
+      {:ok, value1} = Database.load_value(updated_db, <<"key1">>)
+      assert value1 == <<"value1">>
+
+      {:ok, value2} = Database.load_value(updated_db, <<"key2">>)
+      assert value2 == <<"value2">>
+
+      {:ok, page42} = Database.load_page(updated_db, 42)
+      assert page42 == <<"page42">>
+
+      # Verify durable version was persisted
+      {:ok, persisted_version} = Database.load_durable_version(updated_db)
+      assert persisted_version == v2
+    end
+
+    @tag :tmp_dir
+    test "advance_durable_version/3 cleans up lookaside buffer", %{db: db} do
+      # Set up test data
+      v1 = Version.from_integer(100)
+      v2 = Version.from_integer(200)
+      v3 = Version.from_integer(300)
+
+      # Store data across multiple versions
+      :ok = Database.store_value(db, <<"key1">>, v1, <<"value1">>)
+      :ok = Database.store_value(db, <<"key2">>, v2, <<"value2">>)
+      # Above cutoff
+      :ok = Database.store_value(db, <<"key3">>, v3, <<"value3">>)
+
+      # Advance durable version to v2 (should clean up v1 and v2, keep v3)
+      {:ok, updated_db} = Database.advance_durable_version(db, v2, [v1, v2])
+
+      # v1 and v2 should be cleaned from lookaside buffer but still accessible through DETS
+      # Since v1 and v2 are now <= durable_version, fetch_value should route to DETS
+      assert {:ok, <<"value1">>} = Database.fetch_value(updated_db, <<"key1">>, v1)
+      assert {:ok, <<"value2">>} = Database.fetch_value(updated_db, <<"key2">>, v2)
+
+      # v3 should still be in lookaside buffer
+      assert {:ok, <<"value3">>} = Database.fetch_value(updated_db, <<"key3">>, v3)
+
+      # But persisted data should be accessible via DETS
+      assert {:ok, <<"value1">>} = Database.load_value(updated_db, <<"key1">>)
+      assert {:ok, <<"value2">>} = Database.load_value(updated_db, <<"key2">>)
+    end
+
+    @tag :tmp_dir
+    test "advance_durable_version/3 handles deduplication correctly", %{db: db} do
+      # Set up overlapping data that should be deduplicated
+      v1 = Version.from_integer(100)
+      v2 = Version.from_integer(200)
+
+      # Same key updated across versions
+      :ok = Database.store_value(db, <<"key1">>, v1, <<"old_value">>)
+      :ok = Database.store_value(db, <<"key1">>, v2, <<"new_value">>)
+
+      # Same page updated across versions
+      :ok = Database.store_page_version(db, 42, v1, <<"old_page">>)
+      :ok = Database.store_page_version(db, 42, v2, <<"new_page">>)
+
+      # Advance durable version - should persist only newest values
+      {:ok, updated_db} = Database.advance_durable_version(db, v2, [v1, v2])
+
+      # Should have persisted the newest values only
+      {:ok, value} = Database.load_value(updated_db, <<"key1">>)
+      # Not old_value
+      assert value == <<"new_value">>
+
+      {:ok, page} = Database.load_page(updated_db, 42)
+      # Not old_page
+      assert page == <<"new_page">>
+    end
+  end
 end

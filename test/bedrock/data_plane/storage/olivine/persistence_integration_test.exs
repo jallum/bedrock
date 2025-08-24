@@ -158,44 +158,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       Logic.shutdown(state)
     end
-
-    test "multiple startup/shutdown cycles maintain data integrity", %{tmp_dir: tmp_dir} do
-      {:ok, state1} = Logic.startup(:cycle1, self(), :test_id, tmp_dir)
-
-      page = Page.new(1, [{<<"cycle1">>, Version.from_integer(100)}])
-      :ok = PageTestHelpers.persist_page_to_database(state1.version_manager, state1.database, page)
-
-      values1 = [{<<"cycle_key">>, 1, <<"cycle_value_1">>}]
-      :ok = VersionManager.persist_values_to_database(state1.version_manager, state1.database, values1)
-
-      Logic.shutdown(state1)
-
-      {:ok, state2} = Logic.startup(:cycle2, self(), :test_id, tmp_dir)
-
-      page2 = Page.new(2, [{<<"cycle2">>, Version.from_integer(200)}])
-      :ok = PageTestHelpers.persist_page_to_database(state2.version_manager, state2.database, page2)
-
-      values2 = [{<<"cycle_key">>, 2, <<"cycle_value_2">>}]
-      :ok = VersionManager.persist_values_to_database(state2.version_manager, state2.database, values2)
-
-      Logic.shutdown(state2)
-
-      {:ok, state3} = Logic.startup(:cycle3, self(), :test_id, tmp_dir)
-
-      vm = state3.version_manager
-      assert vm.max_page_id == 0
-
-      {:ok, page1_data} = Database.load_page(state3.database, 1)
-      assert Page.keys(page1_data) == [<<"cycle1">>]
-
-      {:ok, page2_data} = Database.load_page(state3.database, 2)
-      assert Page.keys(page2_data) == [<<"cycle2">>]
-
-      {:ok, val2} = Database.load_value(state3.database, <<"cycle_key">>)
-      assert val2 == <<"cycle_value_2">>
-
-      Logic.shutdown(state3)
-    end
   end
 
   describe "edge cases and error conditions" do
@@ -248,37 +210,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       Logic.shutdown(state)
     end
-
-    test "concurrent access simulation", %{tmp_dir: tmp_dir} do
-      # While Olivine doesn't support true concurrency yet, test that
-      # multiple sequential operations don't interfere
-      {:ok, state} = Logic.startup(:concurrent_test, self(), :test_id, tmp_dir)
-
-      vm = state.version_manager
-      db = state.database
-
-      # Simulate rapid sequential operations
-      tasks = 1..10
-
-      Enum.each(tasks, fn i ->
-        page = Page.new(i, [{<<"concurrent_#{i}">>, Version.from_integer(i * 100)}])
-        :ok = PageTestHelpers.persist_page_to_database(vm, db, page)
-
-        values = [{<<"con_key_#{i}">>, i, <<"con_value_#{i}">>}]
-        :ok = VersionManager.persist_values_to_database(vm, db, values)
-      end)
-
-      # Verify all operations completed successfully
-      Enum.each(tasks, fn i ->
-        {:ok, page_data} = Database.load_page(db, i)
-        assert Page.keys(page_data) == [<<"concurrent_#{i}">>]
-
-        {:ok, value} = Database.load_value(db, <<"con_key_#{i}">>)
-        assert value == <<"con_value_#{i}">>
-      end)
-
-      Logic.shutdown(state)
-    end
   end
 
   describe "Phase 1.3 success criteria verification" do
@@ -312,31 +243,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert Page.keys(retrieved_binary) == [<<"test_key">>]
       versions = Enum.map(Page.key_versions(retrieved_binary), fn {_key, version} -> version end)
       assert versions == [Version.from_integer(12_345)]
-
-      Logic.shutdown(state)
-    end
-
-    test "values persist to DETS with {key, version} keys", %{tmp_dir: tmp_dir} do
-      {:ok, state} = Logic.startup(:criteria_values, self(), :test_id, tmp_dir)
-
-      # Store values with various key-version combinations
-      values = [
-        {<<"string_key">>, 100, <<"string_value">>},
-        {<<1, 2, 3>>, 200, <<"binary_value">>},
-        {<<"unicode_ключ">>, 300, <<"unicode_value">>}
-      ]
-
-      :ok = VersionManager.persist_values_to_database(state.version_manager, state.database, values)
-
-      # Verify retrieval (without version since DETS stores version-less)
-      {:ok, val1} = Database.load_value(state.database, <<"string_key">>)
-      assert val1 == <<"string_value">>
-
-      {:ok, val2} = Database.load_value(state.database, <<1, 2, 3>>)
-      assert val2 == <<"binary_value">>
-
-      {:ok, val3} = Database.load_value(state.database, <<"unicode_ключ">>)
-      assert val3 == <<"unicode_value">>
 
       Logic.shutdown(state)
     end

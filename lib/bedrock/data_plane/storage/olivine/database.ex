@@ -1,9 +1,8 @@
 defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   @moduledoc false
 
+  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
   alias Bedrock.DataPlane.Version
-
-  @type page_id :: non_neg_integer()
 
   @opaque t :: %__MODULE__{
             dets_storage: :dets.tab_name(),
@@ -74,7 +73,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
     :ok
   end
 
-  @spec store_page(t(), page_id :: page_id(), page_binary :: binary()) :: :ok | {:error, term()}
+  @spec store_page(t(), page_id :: Page.id(), page_binary :: binary()) :: :ok | {:error, term()}
   def store_page(database, page_id, page_binary) do
     case :dets.insert(database.dets_storage, {page_id, page_binary}) do
       :ok -> :ok
@@ -82,7 +81,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
     end
   end
 
-  @spec load_page(t(), page_id :: page_id()) :: {:ok, binary()} | {:error, :not_found}
+  @spec load_page(t(), page_id :: Page.id()) :: {:ok, binary()} | {:error, :not_found}
   def load_page(database, page_id) do
     case :dets.lookup(database.dets_storage, page_id) do
       [{^page_id, page_binary}] -> {:ok, page_binary}
@@ -143,7 +142,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   Store a page in the lookaside buffer for the given version and page_id.
   This is used during transaction application for modified pages within the window.
   """
-  @spec store_page_version(t(), page_id(), version :: Bedrock.version(), page_binary :: binary()) ::
+  @spec store_page_version(t(), Page.id(), version :: Bedrock.version(), page_binary :: binary()) ::
           :ok | {:error, term()}
   def store_page_version(database, page_id, version, page_binary) do
     if :ets.insert_new(database.lookaside_buffer, {{version, {:page, page_id}}, page_binary}) do
@@ -161,7 +160,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
           t(),
           version :: Bedrock.version(),
           values :: [{Bedrock.key(), Bedrock.value()}],
-          pages :: [{page_id(), binary()}]
+          pages :: [{Page.id(), binary()}]
         ) :: :ok | {:error, term()}
   def batch_store_version_data(database, version, values, pages) do
     value_entries = Enum.map(values, fn {key, value} -> {{version, key}, value} end)
@@ -205,7 +204,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
     end
   end
 
-  @spec get_all_page_ids(t()) :: [page_id()]
+  @spec get_all_page_ids(t()) :: [Page.id()]
   def get_all_page_ids(database) do
     :dets.foldl(
       fn
@@ -229,21 +228,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
       end)
 
     case :dets.insert(database.dets_storage, entries) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  @spec batch_persist_all(
-          t(),
-          pages :: [{page_id(), binary()}],
-          values :: [{Bedrock.key(), Bedrock.value()}],
-          durable_version :: Bedrock.version()
-        ) :: :ok | {:error, term()}
-  def batch_persist_all(database, pages, values, durable_version) do
-    all_entries = pages ++ values ++ [{:durable_version, durable_version}]
-
-    case :dets.insert(database.dets_storage, all_entries) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -335,18 +319,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   """
   @spec advance_durable_version(t(), version :: Bedrock.version(), versions_to_persist :: [Bedrock.version()]) ::
           {:ok, t()} | {:error, term()}
-  def advance_durable_version(database, new_durable_version, versions_to_persist) do
-    # Extract all values and pages from lookaside buffer for specified versions
-    {all_values, all_pages} = extract_persistence_data(database, versions_to_persist)
-
-    with :ok <- batch_persist_all(database, all_pages, all_values, new_durable_version),
-         :ok <- sync(database) do
-      # Clean up the lookaside buffer for persisted versions
-      :ok = cleanup_lookaside_buffer(database, new_durable_version)
-
-      # Update the durable version
-      updated_database = %{database | durable_version: new_durable_version}
-      {:ok, updated_database}
+  def advance_durable_version(database, new_durable_version, _versions_to_persist) do
+    with :ok <- :dets.insert(database.dets_storage, build_dets_tx(database, new_durable_version)),
+         :ok <- sync(database),
+         :ok <- cleanup_lookaside_buffer(database, new_durable_version) do
+      {:ok, %{database | durable_version: new_durable_version}}
     end
   end
 
@@ -357,38 +334,31 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   """
   @spec cleanup_lookaside_buffer(t(), version :: Bedrock.version()) :: :ok
   def cleanup_lookaside_buffer(database, durable_version) do
-    match_spec = [{{{:"$1", :_}, :_}, [{:"=<", :"$1", durable_version}], [true]}]
-    :ets.select_delete(database.lookaside_buffer, match_spec)
+    :ets.select_delete(database.lookaside_buffer, [{{{:"$1", :_}, :_}, [{:"=<", :"$1", durable_version}], [true]}])
     :ok
   end
 
   @doc """
-  Extract all values and pages from the lookaside buffer for versions up to the durable version.
-  Returns separate lists for values and pages ready for DETS persistence.
-  This greatly simplifies the flush operation.
+  Extract deduplicated values and pages from the lookaside buffer for versions up to the durable version.
+  Uses efficient last-writer-wins semantics: processes entries from newest to oldest version,
+  keeping only the first occurrence of each key/page_id. This eliminates redundant persistence.
+  Returns a single list of {key, value} tuples where keys can be integers (page_ids) or binaries.
   """
-  @spec extract_persistence_data(t(), versions :: [Bedrock.version()]) ::
-          {values :: [{Bedrock.key(), Bedrock.value()}], pages :: [{page_id(), binary()}]}
-  def extract_persistence_data(database, versions) do
-    # Simple approach: iterate through all entries and filter
-    all_entries = :ets.tab2list(database.lookaside_buffer)
-    version_set = MapSet.new(versions)
+  @spec build_dets_tx(t(), new_durable_version :: Bedrock.version()) ::
+          [{:durable_version, binary()} | {Bedrock.key(), Bedrock.value()} | {Page.id(), Page.t()}]
+  def build_dets_tx(database, new_durable_version) do
+    [
+      {:durable_version, new_durable_version}
+      | database.lookaside_buffer
+        |> :ets.select_reverse([{{{:"$1", :"$2"}, :"$3"}, [{:"=<", :"$1", new_durable_version}], [{{:"$2", :"$3"}}]}])
+        |> Enum.reduce(%{}, fn
+          {{:page, page_id}, page_binary}, data_map ->
+            Map.put_new(data_map, page_id, page_binary)
 
-    # Filter entries that match our versions and separate values and pages
-    Enum.reduce(all_entries, {[], []}, fn
-      {{version, {:page, page_id}}, page_binary}, {values, pages} ->
-        if MapSet.member?(version_set, version) do
-          {values, [{page_id, page_binary} | pages]}
-        else
-          {values, pages}
-        end
-
-      {{version, key}, value}, {values, pages} when is_binary(key) ->
-        if MapSet.member?(version_set, version) do
-          {[{key, value} | values], pages}
-        else
-          {values, pages}
-        end
-    end)
+          {key, value}, data_map when is_binary(key) ->
+            Map.put_new(data_map, key, value)
+        end)
+        |> Map.to_list()
+    ]
   end
 end
