@@ -287,6 +287,31 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   defp gather_info(:utilization, t), do: VersionManager.info(t.version_manager, :utilization)
   defp gather_info(_unsupported, _t), do: {:error, :unsupported_info}
 
+  @doc """
+  Advances the window with persistence coordination between VersionManager and Database.
+  Logic module provides high-level coordination:
+  - VersionManager determines what needs to be done for window advancement
+  - Database handles persistence operations
+  - State gets updated with results
+  """
+  @spec advance_window_with_persistence(State.t()) :: {:ok, State.t()} | {:error, term()}
+  def advance_window_with_persistence(%State{} = state) do
+    case VersionManager.prepare_window_advancement(state.version_manager) do
+      :no_eviction ->
+        {:ok, state}
+
+      {:evict, new_durable_version, evicted_versions, version_manager} ->
+        with {:ok, database} <-
+               Database.advance_durable_version(
+                 state.database,
+                 new_durable_version,
+                 evicted_versions
+               ) do
+          {:ok, %{state | version_manager: version_manager, database: database}}
+        end
+    end
+  end
+
   defp notify_waitlist_shutdown(waiting_fetches) do
     waiting_fetches
     |> Enum.flat_map(fn {_version, entries} -> entries end)

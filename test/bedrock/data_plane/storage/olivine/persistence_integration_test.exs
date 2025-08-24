@@ -4,6 +4,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Logic
   alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
+  alias Bedrock.DataPlane.Storage.Olivine.State
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager
   alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
   alias Bedrock.DataPlane.Version
@@ -90,18 +91,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
     test "window advancement triggers persistence correctly", %{tmp_dir: tmp_dir} do
       {:ok, state} = Logic.startup(:test_window, self(), :test_id, tmp_dir)
 
-      vm = state.version_manager
-      db = state.database
+      {:ok, updated_state} = Logic.advance_window_with_persistence(state)
 
-      window_data = %{test: "data"}
+      assert updated_state.version_manager
+      assert updated_state.database
 
-      {:ok, updated_vm} = VersionManager.advance_window_with_persistence(vm, db, window_data)
-
-      assert updated_vm
-
-      assert :ok = Database.sync(db)
-
-      Logic.shutdown(%{state | version_manager: updated_vm})
+      Logic.shutdown(updated_state)
     end
 
     test "corrupted page handling during recovery", %{tmp_dir: tmp_dir} do
@@ -515,7 +510,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       :ok = Database.store_value(db, <<"recent_key">>, <<"recent_value">>)
 
       # Advance window with persistence
-      {:ok, _updated_vm} = VersionManager.advance_window_with_persistence(vm, db, nil)
+      temp_state = %State{version_manager: vm, database: db}
+      {:ok, updated_state} = Logic.advance_window_with_persistence(temp_state)
+      _updated_vm = updated_state.version_manager
 
       # Data should be synced to disk (without version since DETS stores version-less)
       {:ok, old_value} = Database.load_value(db, <<"old_key">>)

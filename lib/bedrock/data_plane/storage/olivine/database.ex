@@ -140,6 +140,43 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   end
 
   @doc """
+  Store a page in the lookaside buffer for the given version and page_id.
+  This is used during transaction application for modified pages within the window.
+  """
+  @spec store_page_version(t(), page_id(), version :: Bedrock.version(), page_binary :: binary()) ::
+          :ok | {:error, term()}
+  def store_page_version(database, page_id, version, page_binary) do
+    if :ets.insert_new(database.lookaside_buffer, {{version, {:page, page_id}}, page_binary}) do
+      :ok
+    else
+      {:error, :already_exists}
+    end
+  end
+
+  @doc """
+  Batch store values and pages in the lookaside buffer for a given version.
+  This enables atomic writes during transaction application.
+  """
+  @spec batch_store_version_data(
+          t(),
+          version :: Bedrock.version(),
+          values :: [{Bedrock.key(), Bedrock.value()}],
+          pages :: [{page_id(), binary()}]
+        ) :: :ok | {:error, term()}
+  def batch_store_version_data(database, version, values, pages) do
+    value_entries = Enum.map(values, fn {key, value} -> {{version, key}, value} end)
+    page_entries = Enum.map(pages, fn {page_id, page_binary} -> {{version, {:page, page_id}}, page_binary} end)
+
+    all_entries = value_entries ++ page_entries
+
+    if :ets.insert_new(database.lookaside_buffer, all_entries) do
+      :ok
+    else
+      {:error, :insert_failed}
+    end
+  end
+
+  @doc """
   Returns a value loader function that captures only the minimal data needed
   for async value resolution tasks. Avoids copying the entire Database struct.
   """
@@ -204,11 +241,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
           durable_version :: Bedrock.version()
         ) :: :ok | {:error, term()}
   def batch_persist_all(database, pages, values, durable_version) do
-    page_entries = Enum.map(pages, fn {page_id, page_binary} -> {page_id, page_binary} end)
-    value_entries = Enum.map(values, fn {key, value} -> {key, value} end)
-    version_entry = {:durable_version, durable_version}
-
-    all_entries = page_entries ++ value_entries ++ [version_entry]
+    all_entries = pages ++ values ++ [{:durable_version, durable_version}]
 
     case :dets.insert(database.dets_storage, all_entries) do
       :ok -> :ok
@@ -292,24 +325,29 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   end
 
   @doc """
-  Advances the durable version and returns the updated database.
-  This should be called when the version window advances.
+  Advances the durable version with full persistence handling.
+  This handles the complete persistence process:
+  - Extracts data for the specified versions from lookaside buffer
+  - Persists all values and pages atomically to DETS
+  - Syncs to disk
+  - Cleans up lookaside buffer
+  - Updates durable version
   """
-  @spec advance_durable_version(t(), version :: Bedrock.version()) :: {:ok, t()}
-  def advance_durable_version(database, new_version) do
-    updated_database = %{database | durable_version: new_version}
-    {:ok, updated_database}
-  end
+  @spec advance_durable_version(t(), version :: Bedrock.version(), versions_to_persist :: [Bedrock.version()]) ::
+          {:ok, t()} | {:error, term()}
+  def advance_durable_version(database, new_durable_version, versions_to_persist) do
+    # Extract all values and pages from lookaside buffer for specified versions
+    {all_values, all_pages} = extract_persistence_data(database, versions_to_persist)
 
-  @doc """
-  Removes all entries for a specific version from the lookaside buffer.
-  This is typically called after successfully flushing a version to persistent storage.
-  """
-  @spec remove_version_entries(t(), version :: Bedrock.version()) :: :ok
-  def remove_version_entries(database, target_version) do
-    match_pattern = {{target_version, :_}, :_}
-    :ets.match_delete(database.lookaside_buffer, match_pattern)
-    :ok
+    with :ok <- batch_persist_all(database, all_pages, all_values, new_durable_version),
+         :ok <- sync(database) do
+      # Clean up the lookaside buffer for persisted versions
+      :ok = cleanup_lookaside_buffer(database, new_durable_version)
+
+      # Update the durable version
+      updated_database = %{database | durable_version: new_durable_version}
+      {:ok, updated_database}
+    end
   end
 
   @doc """
@@ -319,39 +357,38 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   """
   @spec cleanup_lookaside_buffer(t(), version :: Bedrock.version()) :: :ok
   def cleanup_lookaside_buffer(database, durable_version) do
-    match_pattern = {{:"$1", :_}, :_}
-    guard_condition = {:"=<", :"$1", durable_version}
-    match_spec = [{match_pattern, [guard_condition], [true]}]
+    match_spec = [{{{:"$1", :_}, :_}, [{:"=<", :"$1", durable_version}], [true]}]
     :ets.select_delete(database.lookaside_buffer, match_spec)
     :ok
   end
 
   @doc """
-  Retrieves all entries for a specific version from the lookaside buffer.
-  Returns a list of {key, value} tuples for the given version.
-  This function is primarily used for testing lookaside buffer functionality.
+  Extract all values and pages from the lookaside buffer for versions up to the durable version.
+  Returns separate lists for values and pages ready for DETS persistence.
+  This greatly simplifies the flush operation.
   """
-  @spec get_version_entries(t(), version :: Bedrock.version()) :: [{Bedrock.key(), Bedrock.value()}]
-  def get_version_entries(database, version) do
-    match_pattern = {{version, :"$1"}, :"$2"}
+  @spec extract_persistence_data(t(), versions :: [Bedrock.version()]) ::
+          {values :: [{Bedrock.key(), Bedrock.value()}], pages :: [{page_id(), binary()}]}
+  def extract_persistence_data(database, versions) do
+    # Simple approach: iterate through all entries and filter
+    all_entries = :ets.tab2list(database.lookaside_buffer)
+    version_set = MapSet.new(versions)
 
-    database.lookaside_buffer
-    |> :ets.match(match_pattern)
-    |> Enum.map(fn [key, value] -> {key, value} end)
-  end
+    # Filter entries that match our versions and separate values and pages
+    Enum.reduce(all_entries, {[], []}, fn
+      {{version, {:page, page_id}}, page_binary}, {values, pages} ->
+        if MapSet.member?(version_set, version) do
+          {values, [{page_id, page_binary} | pages]}
+        else
+          {values, pages}
+        end
 
-  @doc """
-  Retrieves entries for a range of versions from the lookaside buffer.
-  Returns a list of {version, key, value} tuples for versions within the specified range (inclusive).
-  This function is primarily used for testing lookaside buffer functionality.
-  """
-  @spec get_version_range_entries(t(), start_version :: Bedrock.version(), end_version :: Bedrock.version()) ::
-          [{Bedrock.version(), Bedrock.key(), Bedrock.value()}]
-  def get_version_range_entries(database, start_version, end_version) do
-    match_pattern = {{:"$1", :"$2"}, :"$3"}
-    guard_condition = {:andalso, {:>=, :"$1", start_version}, {:"=<", :"$1", end_version}}
-    match_spec = [{match_pattern, [guard_condition], [{{:"$1", :"$2", :"$3"}}]}]
-
-    :ets.select(database.lookaside_buffer, match_spec)
+      {{version, key}, value}, {values, pages} when is_binary(key) ->
+        if MapSet.member?(version_set, version) do
+          {[{key, value} | values], pages}
+        else
+          {values, pages}
+        end
+    end)
   end
 end

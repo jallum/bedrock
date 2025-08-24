@@ -304,6 +304,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     # Pass 2: Process all pending operations for each modified page
     final_page_data = process_all_pending_operations(version_manager, page_data_with_instructions, new_version)
 
+    # Pass 3: Store all modified pages in the lookaside buffer for unified persistence
+    store_modified_pages_in_lookaside(database, final_page_data, new_version)
+
     updated_versions = [{new_version, final_page_data} | version_manager.versions]
 
     %{version_manager | versions: updated_versions, current_version: new_version}
@@ -637,61 +640,57 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     :ok
   end
 
-  @spec advance_window_with_persistence(version_manager :: t(), Database.t(), window_data :: term()) :: {:ok, t()}
-  def advance_window_with_persistence(version_manager, database, _window_data) do
-    # Real durability implementation: persist versions that will be evicted
+  @doc """
+  Updates the versions list in the version manager.
+  Used by Logic module during window advancement after successful persistence.
+  """
+  @spec update_versions(t(), [{Bedrock.version(), version_data()}]) :: t()
+  def update_versions(version_manager, versions) do
+    %{version_manager | versions: versions}
+  end
+
+  @doc """
+  Determines what needs to happen for window advancement.
+  Returns either :no_eviction or {:evict, new_durable_version, evicted_versions, updated_vm}.
+  VersionManager handles all the version management logic internally.
+  """
+  @spec prepare_window_advancement(t()) ::
+          :no_eviction
+          | {:evict, new_durable_version :: Bedrock.version(), evicted_versions :: [Bedrock.version()],
+             updated_vm :: t()}
+  def prepare_window_advancement(version_manager) do
     window_start_version = calculate_window_start(version_manager)
 
     version_manager.versions
     |> split_versions_at_window(window_start_version)
     |> case do
       {_versions_to_keep, []} ->
-        {:ok, version_manager}
+        :no_eviction
 
       {versions_to_keep, versions_to_evict} ->
         new_durable_version = elem(List.first(versions_to_evict), 0)
+        evicted_versions = Enum.map(versions_to_evict, fn {version, _} -> version end)
+        updated_vm = update_versions(version_manager, versions_to_keep)
 
-        {all_pages, all_values} = collect_persistence_data(version_manager, versions_to_evict)
-
-        with :ok <- Database.batch_persist_all(database, all_pages, all_values, new_durable_version),
-             :ok <- Database.sync(database) do
-          # Cleanup lookaside buffer is now handled by Database
-          # :ok = Database.cleanup_lookaside_buffer(database, new_durable_version)
-
-          updated_vm = %{version_manager | versions: versions_to_keep}
-
-          {:ok, updated_vm}
-        end
+        {:evict, new_durable_version, evicted_versions, updated_vm}
     end
   end
 
-  # Optimized helper function to collect all persistence data in one pass
-  @spec collect_persistence_data(t(), [{Bedrock.version(), version_data()}]) ::
-          {[{Database.page_id(), binary()}], [{Bedrock.key(), Bedrock.value()}]}
-  defp collect_persistence_data(_version_manager, versions_to_evict) do
-    {pages_acc, values_acc} =
-      Enum.reduce(versions_to_evict, {[], []}, fn {_version,
-                                                   %VersionData{
-                                                     page_map: page_map,
-                                                     modified_page_ids: modified_page_ids
-                                                   }},
-                                                  {pages_acc, values_acc} ->
-        version_pages =
-          Enum.map(modified_page_ids, fn page_id ->
-            page_binary = Map.fetch!(page_map, page_id)
-            {page_id, page_binary}
-          end)
-
-        # Values are now managed by Database directly
-        version_values = []
-
-        {pages_acc ++ version_pages, values_acc ++ version_values}
+  # Store all modified pages in the lookaside buffer for unified persistence
+  defp store_modified_pages_in_lookaside(database, %VersionData{} = page_data, version) do
+    modified_pages =
+      Enum.map(page_data.modified_page_ids, fn page_id ->
+        page_binary = Map.fetch!(page_data.page_map, page_id)
+        {page_id, page_binary}
       end)
 
-    {pages_acc, values_acc}
+    if !Enum.empty?(modified_pages) do
+      # Use batch_store_version_data with empty values list and our pages
+      :ok = Database.batch_store_version_data(database, version, [], modified_pages)
+    end
   end
 
-  # Lookaside buffer cleanup is now handled by Database module
+  # Persistence is now handled by Database.extract_persistence_data - much simpler!
 
   @spec next_id(version_manager :: t()) :: {page_id(), t()}
   def next_id(version_manager) do
