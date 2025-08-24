@@ -327,23 +327,19 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
     end
   end
 
-  @doc """
-  Efficiently removes all entries for versions older than or equal to the durable version.
-  This is a more efficient way to clean up the lookaside buffer when advancing the durable version.
-  Uses a single select_delete operation to remove all obsolete entries at once.
-  """
+  # Efficiently removes all entries for versions older than or equal to the durable version.
+  # This is a more efficient way to clean up the lookaside buffer when advancing the durable version.
+  # Uses a single select_delete operation to remove all obsolete entries at once.
   @spec cleanup_lookaside_buffer(t(), version :: Bedrock.version()) :: :ok
-  def cleanup_lookaside_buffer(database, durable_version) do
+  defp cleanup_lookaside_buffer(database, durable_version) do
     :ets.select_delete(database.lookaside_buffer, [{{{:"$1", :_}, :_}, [{:"=<", :"$1", durable_version}], [true]}])
     :ok
   end
 
-  @doc """
-  Extract deduplicated values and pages from the lookaside buffer for versions up to the durable version.
-  Uses efficient last-writer-wins semantics: processes entries from newest to oldest version,
-  keeping only the first occurrence of each key/page_id. This eliminates redundant persistence.
-  Returns a single list of {key, value} tuples where keys can be integers (page_ids) or binaries.
-  """
+  # Extract deduplicated values and pages from the lookaside buffer for versions up to the durable version.
+  # Uses efficient last-writer-wins semantics: processes entries from newest to oldest version,
+  # keeping only the first occurrence of each key/page_id. This eliminates redundant persistence.
+  # Returns a single list of {key, value} tuples where keys can be integers (page_ids) or binaries.
   @spec build_dets_tx(t(), new_durable_version :: Bedrock.version()) ::
           [{:durable_version, binary()} | {Bedrock.key(), Bedrock.value()} | {Page.id(), Page.t()}]
   def build_dets_tx(database, new_durable_version) do
