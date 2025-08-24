@@ -1,4 +1,4 @@
-defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager.Page do
+defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager.Page do
   @moduledoc """
   Page management routines for the Olivine storage driver.
 

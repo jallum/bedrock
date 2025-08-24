@@ -4,13 +4,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageTestHelpers do
   """
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
 
   @doc """
   Persists a single page to the database.
   """
   @spec persist_page_to_database(any(), Database.t(), Page.t()) :: :ok | {:error, term()}
-  def persist_page_to_database(_version_manager, database, page) do
+  def persist_page_to_database(_index_manager, database, page) do
     binary = Page.from_map(page)
     Database.store_page(database, Page.id(page), binary)
   end

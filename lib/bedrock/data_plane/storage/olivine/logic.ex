@@ -8,9 +8,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   alias Bedrock.ControlPlane.Director
   alias Bedrock.DataPlane.Storage
   alias Bedrock.DataPlane.Storage.Olivine.Database
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
   alias Bedrock.DataPlane.Storage.Olivine.State
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
   alias Bedrock.Internal.WaitingList
   alias Bedrock.Service.Worker
 
@@ -19,7 +19,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   def startup(otp_name, foreman, id, path) do
     with :ok <- ensure_directory_exists(path),
          {:ok, database} <- Database.open(:"#{otp_name}_db", Path.join(path, "dets")),
-         {:ok, version_manager} <- VersionManager.recover_from_database(database) do
+         {:ok, index_manager} <- IndexManager.recover_from_database(database) do
       {:ok,
        %State{
          path: path,
@@ -27,7 +27,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
          id: id,
          foreman: foreman,
          database: database,
-         version_manager: version_manager
+         index_manager: index_manager
        }}
     end
   end
@@ -63,9 +63,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   @spec unlock_after_recovery(State.t(), Bedrock.version(), TransactionSystemLayout.t()) ::
           {:ok, State.t()}
   def unlock_after_recovery(t, durable_version, %{logs: _logs, services: _services}) do
-    with :ok <- VersionManager.purge_transactions_newer_than(t.version_manager, durable_version) do
+    with :ok <- IndexManager.purge_transactions_newer_than(t.index_manager, durable_version) do
       _apply_and_notify_fn = fn encoded_transactions ->
-        updated_vm = VersionManager.apply_transactions(t.version_manager, encoded_transactions, t.database)
+        updated_vm = IndexManager.apply_transactions(t.index_manager, encoded_transactions, t.database)
         version = updated_vm.current_version
         send(self(), {:transactions_applied, version})
         version
@@ -91,8 +91,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
           | {:error, :version_too_old}
           | {:error, :version_too_new}
   def fetch(%State{} = t, key, version, opts \\ []) do
-    t.version_manager
-    |> VersionManager.fetch_page_for_key(key, version)
+    t.index_manager
+    |> IndexManager.fetch_page_for_key(key, version)
     |> case do
       {:ok, page} -> resolve_fetch_from_page(t, page, key, opts[:reply_fn])
       error -> error
@@ -117,8 +117,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
           | {:error, :version_too_old}
           | {:error, :version_too_new}
   def range_fetch(t, start_key, end_key, version, opts \\ []) do
-    t.version_manager
-    |> VersionManager.fetch_pages_for_range(start_key, end_key, version)
+    t.index_manager
+    |> IndexManager.fetch_pages_for_range(start_key, end_key, version)
     |> case do
       {:ok, pages} ->
         resolve_range_from_pages(t, pages, start_key, end_key, opts)
@@ -276,38 +276,38 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   end
 
   defp gather_info(:id, t), do: t.id
-  defp gather_info(:key_ranges, t), do: VersionManager.info(t.version_manager, :key_ranges)
+  defp gather_info(:key_ranges, t), do: IndexManager.info(t.index_manager, :key_ranges)
   defp gather_info(:kind, _t), do: :storage
-  defp gather_info(:n_keys, t), do: VersionManager.info(t.version_manager, :n_keys)
+  defp gather_info(:n_keys, t), do: IndexManager.info(t.index_manager, :n_keys)
   defp gather_info(:otp_name, t), do: t.otp_name
   defp gather_info(:path, t), do: t.path
   defp gather_info(:pid, _t), do: self()
-  defp gather_info(:size_in_bytes, t), do: VersionManager.info(t.version_manager, :size_in_bytes)
+  defp gather_info(:size_in_bytes, t), do: IndexManager.info(t.index_manager, :size_in_bytes)
   defp gather_info(:supported_info, _t), do: supported_info()
-  defp gather_info(:utilization, t), do: VersionManager.info(t.version_manager, :utilization)
+  defp gather_info(:utilization, t), do: IndexManager.info(t.index_manager, :utilization)
   defp gather_info(_unsupported, _t), do: {:error, :unsupported_info}
 
   @doc """
-  Advances the window with persistence coordination between VersionManager and Database.
+  Advances the window with persistence coordination between IndexManager and Database.
   Logic module provides high-level coordination:
-  - VersionManager determines what needs to be done for window advancement
+  - IndexManager determines what needs to be done for window advancement
   - Database handles persistence operations
   - State gets updated with results
   """
   @spec advance_window_with_persistence(State.t()) :: {:ok, State.t()} | {:error, term()}
   def advance_window_with_persistence(%State{} = state) do
-    case VersionManager.prepare_window_advancement(state.version_manager) do
+    case IndexManager.prepare_window_advancement(state.index_manager) do
       :no_eviction ->
         {:ok, state}
 
-      {:evict, new_durable_version, evicted_versions, version_manager} ->
+      {:evict, new_durable_version, evicted_versions, index_manager} ->
         with {:ok, database} <-
                Database.advance_durable_version(
                  state.database,
                  new_durable_version,
                  evicted_versions
                ) do
-          {:ok, %{state | version_manager: version_manager, database: database}}
+          {:ok, %{state | index_manager: index_manager, database: database}}
         end
     end
   end

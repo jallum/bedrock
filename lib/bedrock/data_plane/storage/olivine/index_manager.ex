@@ -1,4 +1,4 @@
-defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
+defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   @moduledoc """
   Page management core for the Olivine storage driver.
 
@@ -36,8 +36,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
   alias Bedrock.Cluster.Gateway.TransactionBuilder.Tx
   alias Bedrock.DataPlane.Storage.Olivine.Database
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree
+  alias Bedrock.DataPlane.Storage.Olivine.Index
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Tree
   alias Bedrock.DataPlane.Transaction
   alias Bedrock.DataPlane.Version
 
@@ -48,30 +49,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
   @type operation :: {:set, Bedrock.version()} | :clear
 
-  defmodule VersionData do
-    @moduledoc false
-    alias Bedrock.DataPlane.Storage.Olivine.VersionManager
-
-    @type operation :: VersionManager.operation()
-
-    @type t :: %__MODULE__{
-            tree: :gb_trees.tree(),
-            page_map: map(),
-            deleted_page_ids: [Page.id()],
-            modified_page_ids: [Page.id()],
-            pending_operations: %{Page.id() => %{Bedrock.key() => operation()}}
-          }
-
-    defstruct [
-      :tree,
-      :page_map,
-      :deleted_page_ids,
-      :modified_page_ids,
-      :pending_operations
-    ]
-  end
-
-  @type version_data :: VersionData.t()
+  @type version_data :: Index.t()
 
   @opaque t :: %__MODULE__{
             versions: [{Bedrock.version(), version_data()}],
@@ -94,7 +72,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     initial_tree = :gb_trees.empty()
     initial_page_map = %{0 => initial_page_binary}
 
-    initial_version_data = %VersionData{
+    initial_version_data = %Index{
       tree: initial_tree,
       page_map: initial_page_map,
       deleted_page_ids: [],
@@ -129,7 +107,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           end
 
         # Properly reconstruct the last durable version as both current_version and top of versions stack
-        initial_version_data = %VersionData{
+        initial_version_data = %Index{
           tree: tree,
           page_map: initial_page_map,
           deleted_page_ids: [],
@@ -137,7 +115,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           pending_operations: %{}
         }
 
-        version_manager = %__MODULE__{
+        index_manager = %__MODULE__{
           versions: [{durable_version, initial_version_data}],
           current_version: durable_version,
           window_size_in_microseconds: 5_000_000,
@@ -145,7 +123,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           free_page_ids: free_page_ids
         }
 
-        {:ok, version_manager}
+        {:ok, index_manager}
 
       {:error, reason} when reason in [:corrupted_page, :broken_chain, :cycle_detected] ->
         {:error, reason}
@@ -220,17 +198,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           {:ok, Page.t()}
           | {:error, :not_found}
           | {:error, :version_too_new}
-  def fetch_page_for_key(version_manager, _key, version) when version_manager.current_version < version,
+  def fetch_page_for_key(index_manager, _key, version) when index_manager.current_version < version,
     do: {:error, :version_too_new}
 
-  def fetch_page_for_key(version_manager, key, version) do
-    version_manager.versions
+  def fetch_page_for_key(index_manager, key, version) do
+    index_manager.versions
     |> find_best_version_for_fetch(version)
     |> case do
       nil ->
         {:error, :version_too_old}
 
-      %VersionData{tree: tree, page_map: page_map} ->
+      %Index{tree: tree, page_map: page_map} ->
         tree
         |> Tree.page_for_key(key)
         |> case do
@@ -244,16 +222,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           {:ok, [Page.t()]}
           | {:error, :version_too_new}
           | {:error, :version_too_old}
-  def fetch_pages_for_range(version_manager, _start_key, _end_key, version)
-      when version_manager.current_version < version,
-      do: {:error, :version_too_new}
+  def fetch_pages_for_range(index_manager, _start_key, _end_key, version) when index_manager.current_version < version,
+    do: {:error, :version_too_new}
 
-  def fetch_pages_for_range(version_manager, start_key, end_key, version) do
-    case find_best_version_for_fetch(version_manager.versions, version) do
+  def fetch_pages_for_range(index_manager, start_key, end_key, version) do
+    case find_best_version_for_fetch(index_manager.versions, version) do
       nil ->
         {:error, :version_too_old}
 
-      %VersionData{tree: tree, page_map: page_map} ->
+      %Index{tree: tree, page_map: page_map} ->
         pages =
           tree
           |> Tree.page_ids_in_range(start_key, end_key)
@@ -263,12 +240,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     end
   end
 
-  @spec apply_transactions(version_manager :: t(), encoded_transactions :: [binary()], database :: Database.t()) :: t()
-  def apply_transactions(version_manager, [], _database), do: version_manager
+  @spec apply_transactions(index_manager :: t(), encoded_transactions :: [binary()], database :: Database.t()) :: t()
+  def apply_transactions(index_manager, [], _database), do: index_manager
 
-  def apply_transactions(version_manager, transactions, database) when is_list(transactions),
+  def apply_transactions(index_manager, transactions, database) when is_list(transactions),
     do:
-      Enum.reduce(transactions, version_manager, fn transaction, vm_acc ->
+      Enum.reduce(transactions, index_manager, fn transaction, vm_acc ->
         apply_single_transaction(transaction, vm_acc, database)
       end)
 
@@ -279,12 +256,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   Creates a new version and applies all mutations in the transaction.
   """
   @spec apply_single_transaction(binary(), t(), Database.t()) :: t()
-  def apply_single_transaction(transaction_binary, version_manager, database) do
+  def apply_single_transaction(transaction_binary, index_manager, database) do
     commit_version = Transaction.extract_commit_version!(transaction_binary)
 
     transaction_binary
     |> Transaction.stream_mutations!()
-    |> apply_mutations_to_version(commit_version, version_manager, database)
+    |> apply_mutations_to_version(commit_version, index_manager, database)
   end
 
   @doc """
@@ -292,44 +269,44 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   Uses a two-pass approach: first collect all instructions, then process each page.
   """
   @spec apply_mutations_to_version(Enumerable.t(), Bedrock.version(), t(), Database.t()) :: t()
-  def apply_mutations_to_version(mutations, new_version, version_manager, database) do
-    current_page_data = get_current_page_data(version_manager)
+  def apply_mutations_to_version(mutations, new_version, index_manager, database) do
+    current_page_data = get_current_page_data(index_manager)
 
     # Pass 1: Distribute instructions across pages
     page_data_with_instructions =
       Enum.reduce(mutations, current_page_data, fn mutation, page_data_acc ->
-        apply_single_mutation(version_manager, mutation, new_version, page_data_acc, database)
+        apply_single_mutation(index_manager, mutation, new_version, page_data_acc, database)
       end)
 
     # Pass 2: Process all pending operations for each modified page
-    new_version_data = process_all_pending_operations(version_manager, page_data_with_instructions, new_version)
+    new_version_data = process_all_pending_operations(index_manager, page_data_with_instructions, new_version)
 
     # Pass 3: Store all modified pages in the lookaside buffer for unified persistence
     store_modified_pages(database, new_version_data)
 
     %{
-      version_manager
-      | versions: [{new_version, new_version_data} | version_manager.versions],
+      index_manager
+      | versions: [{new_version, new_version_data} | index_manager.versions],
         current_version: new_version
     }
   end
 
   @spec apply_single_mutation(t(), Tx.mutation(), Bedrock.version(), version_data(), Database.t()) :: version_data()
-  def apply_single_mutation(version_manager, mutation, new_version, page_data, database) do
+  def apply_single_mutation(index_manager, mutation, new_version, page_data, database) do
     case mutation do
       {:set, key, value} ->
-        apply_set_mutation(version_manager, key, value, new_version, page_data, database)
+        apply_set_mutation(index_manager, key, value, new_version, page_data, database)
 
       {:clear, key} ->
-        apply_clear_mutation(version_manager, key, new_version, page_data)
+        apply_clear_mutation(index_manager, key, new_version, page_data)
 
       {:clear_range, start_key, end_key} ->
-        apply_range_clear_mutation(version_manager, start_key, end_key, new_version, page_data)
+        apply_range_clear_mutation(index_manager, start_key, end_key, new_version, page_data)
     end
   end
 
   @spec apply_set_mutation(t(), binary(), binary(), Bedrock.version(), version_data(), Database.t()) :: version_data()
-  defp apply_set_mutation(_version_manager, key, value, new_version, %VersionData{} = page_data, database) do
+  defp apply_set_mutation(_index_manager, key, value, new_version, %Index{} = page_data, database) do
     target_page_id = Tree.page_for_insertion(page_data.tree, key)
 
     # Store the value in database (handles lookaside buffer internally)
@@ -347,7 +324,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   end
 
   @spec apply_clear_mutation(t(), binary(), Bedrock.version(), version_data()) :: version_data()
-  defp apply_clear_mutation(_version_manager, key, _new_version, %VersionData{} = page_data) do
+  defp apply_clear_mutation(_index_manager, key, _new_version, %Index{} = page_data) do
     case Tree.page_for_key(page_data.tree, key) do
       nil ->
         # Key doesn't exist, no operation needed
@@ -367,7 +344,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   end
 
   @spec apply_range_clear_mutation(t(), binary(), binary(), Bedrock.version(), version_data()) :: version_data()
-  defp apply_range_clear_mutation(_version_manager, start_key, end_key, _new_version, %VersionData{} = page_data) do
+  defp apply_range_clear_mutation(_index_manager, start_key, end_key, _new_version, %Index{} = page_data) do
     overlapping_page_ids = Tree.page_ids_in_range(page_data.tree, start_key, end_key)
 
     case overlapping_page_ids do
@@ -444,18 +421,18 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   end
 
   @spec process_all_pending_operations(t(), version_data(), Bedrock.version()) :: version_data()
-  defp process_all_pending_operations(version_manager, %VersionData{} = page_data, new_version) do
+  defp process_all_pending_operations(index_manager, %Index{} = page_data, new_version) do
     # Process each page that has pending operations using sorted merge
     page_data.pending_operations
     |> Enum.reduce(page_data, fn {page_id, operations}, page_data_acc ->
-      process_page_operations(version_manager, page_data_acc, page_id, operations, new_version)
+      process_page_operations(index_manager, page_data_acc, page_id, operations, new_version)
     end)
     |> clear_all_pending_operations()
   end
 
   @spec process_page_operations(t(), version_data(), page_id(), %{Bedrock.key() => operation()}, Bedrock.version()) ::
           version_data()
-  defp process_page_operations(version_manager, %VersionData{} = page_data, page_id, operations, _new_version) do
+  defp process_page_operations(index_manager, %Index{} = page_data, page_id, operations, _new_version) do
     page_binary = Map.fetch!(page_data.page_map, page_id)
 
     # Apply operations and encode directly to binary (no intermediate struct)
@@ -474,7 +451,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
       Page.key_count(updated_page_binary) > 256 ->
         # Page needs splitting
-        handle_page_split(version_manager, page_data, page_id, page_binary, updated_page_binary)
+        handle_page_split(index_manager, page_data, page_id, page_binary, updated_page_binary)
 
       true ->
         # Normal page update
@@ -488,15 +465,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   end
 
   @spec handle_page_split(t(), version_data(), page_id(), binary(), binary()) :: version_data()
-  defp handle_page_split(
-         version_manager,
-         %VersionData{} = page_data,
-         page_id,
-         original_page_binary,
-         updated_page_binary
-       ) do
+  defp handle_page_split(index_manager, %Index{} = page_data, page_id, original_page_binary, updated_page_binary) do
     # Split the page directly using binary format
-    {{left_page_binary, right_page_binary}, _updated_vm} = split_page_binary(updated_page_binary, version_manager)
+    {{left_page_binary, right_page_binary}, _updated_vm} = split_page_binary(updated_page_binary, index_manager)
 
     updated_tree =
       page_data.tree
@@ -538,29 +509,29 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   end
 
   @spec clear_all_pending_operations(version_data()) :: version_data()
-  defp clear_all_pending_operations(%VersionData{} = page_data) do
+  defp clear_all_pending_operations(%Index{} = page_data) do
     %{page_data | pending_operations: %{}}
   end
 
   # Helper Functions
 
-  @spec last_committed_version(version_manager :: t()) :: Bedrock.version()
-  def last_committed_version(version_manager), do: version_manager.current_version
+  @spec last_committed_version(index_manager :: t()) :: Bedrock.version()
+  def last_committed_version(index_manager), do: index_manager.current_version
 
   # These functions are deprecated - durable version is now managed by Database
-  @spec last_durable_version(version_manager :: t()) :: nil
-  def last_durable_version(_version_manager), do: nil
+  @spec last_durable_version(index_manager :: t()) :: nil
+  def last_durable_version(_index_manager), do: nil
 
-  @spec oldest_durable_version(version_manager :: t()) :: nil
-  def oldest_durable_version(_version_manager), do: nil
+  @spec oldest_durable_version(index_manager :: t()) :: nil
+  def oldest_durable_version(_index_manager), do: nil
 
-  @spec purge_transactions_newer_than(version_manager :: t(), version :: Bedrock.version()) :: :ok
-  def purge_transactions_newer_than(_version_manager, _version) do
+  @spec purge_transactions_newer_than(index_manager :: t(), version :: Bedrock.version()) :: :ok
+  def purge_transactions_newer_than(_index_manager, _version) do
     :ok
   end
 
-  @spec info(version_manager :: t(), atom()) :: term()
-  def info(version_manager, stat) do
+  @spec info(index_manager :: t(), atom()) :: term()
+  def info(index_manager, stat) do
     case stat do
       # Key count tracking will be implemented in a future phase.
       # This will require maintaining counters of unique keys across
@@ -578,8 +549,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
       # This will maintain metadata about the range of keys managed
       # by this version manager for partition coordination.
       :key_ranges -> []
-      :max_page_id -> version_manager.max_page_id
-      :free_page_ids -> version_manager.free_page_ids
+      :max_page_id -> index_manager.max_page_id
+      :free_page_ids -> index_manager.free_page_ids
       _ -> :undefined
     end
   end
@@ -593,10 +564,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           :no_eviction
           | {:evict, new_durable_version :: Bedrock.version(), evicted_versions :: [Bedrock.version()],
              updated_vm :: t()}
-  def prepare_window_advancement(version_manager) do
-    window_start_version = calculate_window_start(version_manager)
+  def prepare_window_advancement(index_manager) do
+    window_start_version = calculate_window_start(index_manager)
 
-    version_manager.versions
+    index_manager.versions
     |> split_versions_at_window(window_start_version)
     |> case do
       {_versions_to_keep, []} ->
@@ -606,12 +577,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
         new_durable_version = elem(List.first(versions_to_evict), 0)
         evicted_versions = Enum.map(versions_to_evict, fn {version, _} -> version end)
 
-        {:evict, new_durable_version, evicted_versions, %{version_manager | versions: versions_to_keep}}
+        {:evict, new_durable_version, evicted_versions, %{index_manager | versions: versions_to_keep}}
     end
   end
 
   # Store all modified pages in the lookaside buffer for unified persistence
-  defp store_modified_pages(database, %VersionData{} = page_data) do
+  defp store_modified_pages(database, %Index{} = page_data) do
     page_data.page_map
     |> Map.take(page_data.modified_page_ids)
     |> Enum.each(fn {page_id, page} ->
@@ -621,15 +592,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
 
   # Persistence is now handled by Database.extract_deduplicated_persistence_data - much simpler and more efficient!
 
-  @spec next_id(version_manager :: t()) :: {page_id(), t()}
-  def next_id(version_manager) do
-    case version_manager.free_page_ids do
+  @spec next_id(index_manager :: t()) :: {page_id(), t()}
+  def next_id(index_manager) do
+    case index_manager.free_page_ids do
       [page_id | rest] ->
-        {page_id, %{version_manager | free_page_ids: rest}}
+        {page_id, %{index_manager | free_page_ids: rest}}
 
       [] ->
-        new_page_id = version_manager.max_page_id + 1
-        {new_page_id, %{version_manager | max_page_id: new_page_id}}
+        new_page_id = index_manager.max_page_id + 1
+        {new_page_id, %{index_manager | max_page_id: new_page_id}}
     end
   end
 
@@ -644,8 +615,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   @spec calculate_window_start(t()) :: Bedrock.version()
   # Calculate window start based on current version (timestamp) minus window size
   # Versions are microsecond timestamps, so we subtract window_size_in_microseconds
-  def calculate_window_start(version_manager) do
-    Version.subtract(version_manager.current_version, version_manager.window_size_in_microseconds)
+  def calculate_window_start(index_manager) do
+    Version.subtract(index_manager.current_version, index_manager.window_size_in_microseconds)
   rescue
     ArgumentError ->
       # Underflow - return zero version
@@ -704,16 +675,16 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   This function only manages version advancement and window eviction.
   """
   @spec advance_version(t(), Bedrock.version()) :: t()
-  def advance_version(version_manager, new_version) do
-    window_start_version = calculate_window_start(version_manager)
+  def advance_version(index_manager, new_version) do
+    window_start_version = calculate_window_start(index_manager)
 
-    {versions_to_keep, _versions_to_evict} = split_versions_at_window(version_manager.versions, window_start_version)
+    {versions_to_keep, _versions_to_evict} = split_versions_at_window(index_manager.versions, window_start_version)
 
     # Note: advance_version only manages in-memory version eviction
     # Persistence should be handled by advance_window_with_persistence before calling this function
     # This separation allows for proper error handling and transaction semantics
 
-    %{version_manager | versions: versions_to_keep, current_version: new_version}
+    %{index_manager | versions: versions_to_keep, current_version: new_version}
   end
 
   # Helper Functions for MVCC Value Retrieval (Phase 3.2)
@@ -741,10 +712,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     end
   end
 
-  @spec split_page_with_tree_update(page :: Page.t(), version_manager :: t()) ::
+  @spec split_page_with_tree_update(page :: Page.t(), index_manager :: t()) ::
           {{Page.t(), Page.t()}, t()} | {:error, :no_split_needed}
-  def split_page_with_tree_update(page, version_manager) do
-    case split_page_simple(page, version_manager) do
+  def split_page_with_tree_update(page, index_manager) do
+    case split_page_simple(page, index_manager) do
       {:error, :no_split_needed} = error ->
         error
 
@@ -753,7 +724,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
           [] ->
             {{left_page, right_page}, updated_vm}
 
-          [{current_version, %VersionData{} = version_data} | rest_versions] ->
+          [{current_version, %Index{} = version_data} | rest_versions] ->
             tree =
               version_data.tree
               |> Tree.remove_page_from_tree(page)
@@ -779,7 +750,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   def get_current_tree(%__MODULE__{versions: []}),
     do: raise("Invalid state: version manager has no versions - this indicates a bug in recovery or initialization")
 
-  def get_current_tree(%__MODULE__{versions: [{_version, %VersionData{tree: tree}} | _]}), do: tree
+  def get_current_tree(%__MODULE__{versions: [{_version, %Index{tree: tree}} | _]}), do: tree
 
   # Lookaside buffer management functions have been moved to Database module
 
@@ -789,8 +760,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   The versions list should always be available and prepared in recover_from_database.
   """
   @spec get_current_page_data(t()) :: version_data()
-  def get_current_page_data(version_manager) do
-    case version_manager.versions do
+  def get_current_page_data(index_manager) do
+    case index_manager.versions do
       [] ->
         raise "Invalid state: version manager has no versions - this indicates a bug in recovery or initialization"
 
@@ -802,13 +773,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
   # Page management functions moved from Page module
 
   @spec split_page_simple(Page.t(), t()) :: {{Page.t(), Page.t()}, t()} | {:error, :no_split_needed}
-  defp split_page_simple(page, version_manager) when length(page.key_versions) > 256 do
+  defp split_page_simple(page, index_manager) when length(page.key_versions) > 256 do
     key_versions = page.key_versions
     mid_point = div(length(key_versions), 2)
 
     {left_key_versions, right_key_versions} = Enum.split(key_versions, mid_point)
 
-    updated_vm = %{version_manager | max_page_id: max(version_manager.max_page_id, page.id)}
+    updated_vm = %{index_manager | max_page_id: max(index_manager.max_page_id, page.id)}
     {right_id, vm1} = next_id_from_vm(updated_vm)
 
     left_id = page.id
@@ -819,30 +790,30 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManager do
     {{left_page, right_page}, vm1}
   end
 
-  defp split_page_simple(_page, _version_manager), do: {:error, :no_split_needed}
+  defp split_page_simple(_page, _index_manager), do: {:error, :no_split_needed}
 
   # Binary-optimized page splitting using Page.split_page/3
   @spec split_page_binary(binary(), t()) :: {{binary(), binary()}, t()} | {:error, :no_split_needed}
-  defp split_page_binary(page_binary, version_manager) do
+  defp split_page_binary(page_binary, index_manager) do
     case Page.key_count(page_binary) do
       key_count when key_count > 256 ->
-        {new_page_id, version_manager} = next_id_from_vm(version_manager)
+        {new_page_id, index_manager} = next_id_from_vm(index_manager)
 
-        {Page.split_page(page_binary, div(key_count, 2), new_page_id), version_manager}
+        {Page.split_page(page_binary, div(key_count, 2), new_page_id), index_manager}
 
       _ ->
         {:error, :no_split_needed}
     end
   end
 
-  defp next_id_from_vm(version_manager) do
-    case version_manager.free_page_ids do
+  defp next_id_from_vm(index_manager) do
+    case index_manager.free_page_ids do
       [id | rest] ->
-        {id, %{version_manager | free_page_ids: rest}}
+        {id, %{index_manager | free_page_ids: rest}}
 
       [] ->
-        new_id = version_manager.max_page_id + 1
-        {new_id, %{version_manager | max_page_id: new_id}}
+        new_id = index_manager.max_page_id + 1
+        {new_id, %{index_manager | max_page_id: new_id}}
     end
   end
 

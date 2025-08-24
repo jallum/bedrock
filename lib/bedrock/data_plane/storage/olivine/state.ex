@@ -3,7 +3,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.State do
 
   alias Bedrock.ControlPlane.Director
   alias Bedrock.DataPlane.Storage.Olivine.Database
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager
   alias Bedrock.Internal.WaitingList
   alias Bedrock.Service.Foreman
   alias Bedrock.Service.Worker
@@ -14,7 +14,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.State do
           foreman: Foreman.ref(),
           id: Worker.id(),
           database: Database.t(),
-          version_manager: VersionManager.t(),
+          index_manager: IndexManager.t(),
           pull_task: Task.t() | nil,
           epoch: Bedrock.epoch() | nil,
           director: Director.ref() | nil,
@@ -27,7 +27,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.State do
             foreman: nil,
             id: nil,
             database: nil,
-            version_manager: nil,
+            index_manager: nil,
             pull_task: nil,
             epoch: nil,
             director: nil,

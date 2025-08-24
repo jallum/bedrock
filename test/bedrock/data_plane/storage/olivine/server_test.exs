@@ -2,14 +2,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.ServerTest do
   use ExUnit.Case, async: true
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager
   alias Bedrock.DataPlane.Storage.Olivine.Server
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager
 
   describe "module structure" do
     test "all modules compile and load successfully" do
       assert Code.ensure_loaded(Server) == {:module, Server}
       assert Code.ensure_loaded(Database) == {:module, Database}
-      assert Code.ensure_loaded(VersionManager) == {:module, VersionManager}
+      assert Code.ensure_loaded(IndexManager) == {:module, IndexManager}
     end
 
     test "basic DETS operations work" do
@@ -21,9 +21,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.ServerTest do
       File.rm(temp_path)
     end
 
-    test "VersionManager can be created" do
-      vm = VersionManager.new()
-      assert %VersionManager{} = vm
+    test "IndexManager can be created" do
+      vm = IndexManager.new()
+      assert %IndexManager{} = vm
     end
 
     test "basic telemetry events can be emitted" do

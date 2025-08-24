@@ -1,6 +1,6 @@
-defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
+defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerPropertyTest do
   @moduledoc """
-  Property-based tests for the VersionManager module.
+  Property-based tests for the IndexManager module.
 
   These tests verify important invariants and properties of the tree operations,
   key insertion logic, and page management functionality using random generated data.
@@ -43,10 +43,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
 
   import StreamData
 
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Tree
   alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Tree
   alias Bedrock.DataPlane.Version
 
   # Generators
@@ -317,7 +317,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.VersionManagerPropertyTest do
 
       if length(all_keys) > 256 do
         versions = Enum.map(all_keys, fn _ -> Version.from_integer(1) end)
-        _vm = VersionManager.new()
+        _vm = IndexManager.new()
         oversized_page = Page.new(1, Enum.zip(all_keys, versions))
 
         if Page.key_count(oversized_page) > 256 do

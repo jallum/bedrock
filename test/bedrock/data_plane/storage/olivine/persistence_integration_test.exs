@@ -2,11 +2,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
   use ExUnit.Case, async: true
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
   alias Bedrock.DataPlane.Storage.Olivine.Logic
   alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Storage.Olivine.State
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
   alias Bedrock.DataPlane.Version
 
   # Helper functions for cleaner test assertions
@@ -35,9 +35,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert state.id == :test_id
       assert state.path == tmp_dir
       assert state.database
-      assert state.version_manager
+      assert state.index_manager
 
-      vm = state.version_manager
+      vm = state.index_manager
       assert vm.max_page_id == 0
       assert vm.free_page_ids == []
       assert vm.current_version == Version.zero()
@@ -72,7 +72,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       {:ok, state} = Logic.startup(:test_recovery, self(), :test_id, tmp_dir)
 
-      vm = state.version_manager
+      vm = state.index_manager
       assert vm.max_page_id == 5
       assert Enum.sort(vm.free_page_ids) == [1, 3, 4]
 
@@ -93,7 +93,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       {:ok, updated_state} = Logic.advance_window_with_persistence(state)
 
-      assert updated_state.version_manager
+      assert updated_state.index_manager
       assert updated_state.database
 
       Logic.shutdown(updated_state)
@@ -146,7 +146,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       recovery_time = end_time - start_time
       assert recovery_time < 1000
 
-      vm = state.version_manager
+      vm = state.index_manager
       assert vm.max_page_id == 49
       assert vm.free_page_ids == []
 
@@ -189,7 +189,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       # Recovery should handle missing page 0
       {:ok, state} = Logic.startup(:no_zero_recovery, self(), :test_id, tmp_dir)
 
-      vm = state.version_manager
+      vm = state.index_manager
       # Note: Since page 0 doesn't exist, no valid chain is found
       # max_page_id should be 0 (default) and no free pages
       assert vm.max_page_id == 0
@@ -234,7 +234,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       # Create and persist a page
       page = Page.new(42, [{<<"test_key">>, Version.from_integer(12_345)}])
-      :ok = PageTestHelpers.persist_page_to_database(state.version_manager, state.database, page)
+      :ok = PageTestHelpers.persist_page_to_database(state.index_manager, state.database, page)
 
       # Retrieve and verify
       {:ok, retrieved_binary} = Database.load_page(state.database, 42)
@@ -270,7 +270,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       {:ok, state} = Logic.startup(:rebuild_recovery, self(), :test_id, tmp_dir)
 
       # Verify structure rebuilt correctly
-      vm = state.version_manager
+      vm = state.index_manager
       assert vm.max_page_id == 7
 
       # Free pages should be: 1, 4, 5, 6 (gaps in 0,2,3,7)
@@ -297,7 +297,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       # Recovery should find maximum correctly
       {:ok, state} = Logic.startup(:max_id_recovery, self(), :test_id, tmp_dir)
 
-      vm = state.version_manager
+      vm = state.index_manager
       # Note: Only page 0 is part of the valid chain (others are not linked)
       # max_page_id should be 0 (since page 0 is highest in valid chain) and no free pages
       assert vm.max_page_id == 0
@@ -328,7 +328,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       file_path = Path.join(tmp_dir, "window_eviction.dets")
       {:ok, db} = Database.open(:window_test, file_path)
 
-      vm = VersionManager.new()
+      vm = IndexManager.new()
       # Create test versions (older to newer)
       # Old version - will be evicted
       v1 = Version.from_integer(100)
@@ -359,7 +359,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       # Advance to a new version, which should trigger window eviction
       new_version = Version.from_integer(400)
-      updated_vm = VersionManager.advance_version(vm, new_version)
+      updated_vm = IndexManager.advance_version(vm, new_version)
 
       # NOTE: advance_version doesn't add to versions list, only current_version is updated
       # So only existing versions should be present in memory
@@ -394,7 +394,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       file_path = Path.join(tmp_dir, "window_persistence.dets")
       {:ok, db} = Database.open(:window_persist_test, file_path)
 
-      vm = VersionManager.new()
+      vm = IndexManager.new()
       # Create test versions (older to newer)
       # Old version - will be evicted
       old_version = Version.from_integer(100)
@@ -416,9 +416,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       :ok = Database.store_value(db, <<"recent_key">>, <<"recent_value">>)
 
       # Advance window with persistence
-      temp_state = %State{version_manager: vm, database: db}
+      temp_state = %State{index_manager: vm, database: db}
       {:ok, updated_state} = Logic.advance_window_with_persistence(temp_state)
-      _updated_vm = updated_state.version_manager
+      _updated_vm = updated_state.index_manager
 
       # Data should be synced to disk (without version since DETS stores version-less)
       {:ok, old_value} = Database.load_value(db, <<"old_key">>)
@@ -434,7 +434,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       file_path = Path.join(tmp_dir, "page_window.dets")
       {:ok, db} = Database.open(:page_window_test, file_path)
 
-      vm = VersionManager.new()
+      vm = IndexManager.new()
       # Mark as unused
       _current_time = :os.system_time(:millisecond)
 
@@ -465,7 +465,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       # Advance version to trigger eviction
       # Use predictable test version
       new_version = Version.from_integer(3)
-      updated_vm = VersionManager.advance_version(vm, new_version)
+      updated_vm = IndexManager.advance_version(vm, new_version)
 
       # NOTE: For MVP, no versions are evicted, so both should still be in memory
       version_list = Enum.map(updated_vm.versions, fn {v, _} -> v end)
@@ -488,7 +488,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       # Session 1: Create data with timestamps and shut down
       {:ok, db1} = Database.open(:session1, file_path)
-      _vm1 = VersionManager.new()
+      _vm1 = IndexManager.new()
       # Mark as unused
       _current_time = :os.system_time(:millisecond)
 
@@ -507,7 +507,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       # Session 2: Restart and verify window behavior
       {:ok, db2} = Database.open(:session2, file_path)
-      {:ok, vm2} = VersionManager.recover_from_database(db2)
+      {:ok, vm2} = IndexManager.recover_from_database(db2)
 
       # Data should still be accessible regardless of in-memory window state
       # (without version since DETS stores version-less)

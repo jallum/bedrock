@@ -1,7 +1,7 @@
 defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   @moduledoc false
 
-  alias Bedrock.DataPlane.Storage.Olivine.VersionManager.Page
+  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
   alias Bedrock.DataPlane.Version
 
   @opaque t :: %__MODULE__{
