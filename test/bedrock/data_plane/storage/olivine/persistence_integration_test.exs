@@ -2,8 +2,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
   use ExUnit.Case, async: true
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
   alias Bedrock.DataPlane.Storage.Olivine.Logic
   alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Storage.Olivine.State

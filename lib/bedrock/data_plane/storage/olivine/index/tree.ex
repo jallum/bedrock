@@ -1,4 +1,4 @@
-defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager.Tree do
+defmodule Bedrock.DataPlane.Storage.Olivine.Index.Tree do
   @moduledoc """
   Tree operations for the Olivine storage driver.
 
@@ -9,7 +9,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager.Tree do
   - Range queries using tree structure
   """
 
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
 
   @type t :: t()
 

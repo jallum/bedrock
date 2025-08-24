@@ -43,9 +43,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerPropertyTest do
 
   import StreamData
 
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Tree
   alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Version
 

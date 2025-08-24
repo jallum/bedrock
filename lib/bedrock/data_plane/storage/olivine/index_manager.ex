@@ -37,8 +37,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   alias Bedrock.Cluster.Gateway.TransactionBuilder.Tx
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Index
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Tree
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
   alias Bedrock.DataPlane.Transaction
   alias Bedrock.DataPlane.Version
 

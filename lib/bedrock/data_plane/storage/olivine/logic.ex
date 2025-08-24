@@ -8,8 +8,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   alias Bedrock.ControlPlane.Director
   alias Bedrock.DataPlane.Storage
   alias Bedrock.DataPlane.Storage.Olivine.Database
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
   alias Bedrock.DataPlane.Storage.Olivine.State
   alias Bedrock.Internal.WaitingList
   alias Bedrock.Service.Worker

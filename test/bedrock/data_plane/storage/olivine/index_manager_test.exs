@@ -2,8 +2,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
   use ExUnit.Case, async: true
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
   alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Transaction
   alias Bedrock.DataPlane.Version

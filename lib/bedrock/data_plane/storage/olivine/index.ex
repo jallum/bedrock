@@ -1,8 +1,8 @@
 defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   @moduledoc false
 
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
 
   @type operation :: IndexManager.operation()
 

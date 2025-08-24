@@ -4,7 +4,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageTestHelpers do
   """
 
   alias Bedrock.DataPlane.Storage.Olivine.Database
-  alias Bedrock.DataPlane.Storage.Olivine.IndexManager.Page
+  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
 
   @doc """
   Persists a single page to the database.
