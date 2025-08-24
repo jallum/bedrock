@@ -95,28 +95,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
     # Get the durable version from the database
     {:ok, durable_version} = Database.load_durable_version(database)
 
-    # Traverse pages from page 0 to rebuild page structure and calculate metadata
-    case load_and_rebuild_pages(database) do
-      {:ok, tree, max_page_id, free_page_ids} ->
-        # Create initial page_map - if empty database, include page 0 like new() does
-        initial_page_map =
-          if :gb_trees.is_empty(tree) and max_page_id == 0 do
-            %{0 => Page.new(0, [])}
-          else
-            %{}
-          end
-
-        # Properly reconstruct the last durable version as both current_version and top of versions stack
-        initial_version_data = %Index{
-          tree: tree,
-          page_map: initial_page_map,
-          deleted_page_ids: [],
-          modified_page_ids: [],
-          pending_operations: %{}
-        }
-
+    # Load the index structure from the database
+    case Index.load_from(database) do
+      {:ok, initial_index, max_page_id, free_page_ids} ->
         index_manager = %__MODULE__{
-          versions: [{durable_version, initial_version_data}],
+          versions: [{durable_version, initial_index}],
           current_version: durable_version,
           window_size_in_microseconds: 5_000_000,
           max_page_id: max_page_id,
@@ -125,67 +108,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
 
         {:ok, index_manager}
 
-      {:error, reason} when reason in [:corrupted_page, :broken_chain, :cycle_detected] ->
+      {:error, reason} when reason in [:corrupted_page, :broken_chain, :cycle_detected, :no_chain] ->
         {:error, reason}
     end
-  end
-
-  defp load_and_rebuild_pages(database) do
-    case load_page_chain(database, 0, %{}) do
-      {:ok, page_map} ->
-        tree = Tree.from_page_map(page_map)
-        page_ids = page_map |> Map.keys() |> MapSet.new()
-        max_page_id = max(0, Enum.max(page_ids))
-        free_page_ids = calculate_free_page_ids(max_page_id, page_ids)
-
-        {:ok, tree, max_page_id, free_page_ids}
-
-      {:error, :no_chain} ->
-        {:ok, :gb_trees.empty(), 0, []}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp load_page_chain(_database, page_id, page_map) when is_map_key(page_map, page_id), do: {:error, :cycle_detected}
-
-  defp load_page_chain(database, page_id, page_map) do
-    case Database.load_page(database, page_id) do
-      {:ok, page_binary} ->
-        # Basic validation of binary page format
-        case page_binary do
-          <<_id::32, _next_id::32, _key_count::16, _last_key_offset::32, _reserved::16, _entries::binary>> ->
-            page_map
-            |> Map.put(page_id, page_binary)
-            |> continue_page_chain(database, page_binary)
-
-          _ ->
-            {:error, :corrupted_page}
-        end
-
-      {:error, :not_found} when page_id == 0 ->
-        {:error, :no_chain}
-
-      {:error, :not_found} ->
-        {:error, :broken_chain}
-    end
-  end
-
-  defp continue_page_chain(page_map, database, page_binary) do
-    case Page.next_id(page_binary) do
-      0 -> {:ok, page_map}
-      next_id -> load_page_chain(database, next_id, page_map)
-    end
-  end
-
-  defp calculate_free_page_ids(0, _all_existing_page_ids), do: []
-
-  defp calculate_free_page_ids(max_page_id, all_existing_page_ids) do
-    0..max_page_id
-    |> MapSet.new()
-    |> MapSet.difference(all_existing_page_ids)
-    |> Enum.sort()
   end
 
   defp add_unique_page_id(id_list, id, acc \\ [])
@@ -203,18 +128,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
 
   def fetch_page_for_key(index_manager, key, version) do
     index_manager.versions
-    |> find_best_version_for_fetch(version)
+    |> find_best_index_for_fetch(version)
     |> case do
       nil ->
         {:error, :version_too_old}
 
-      %Index{tree: tree, page_map: page_map} ->
-        tree
-        |> Tree.page_for_key(key)
-        |> case do
-          nil -> {:error, :not_found}
-          page_id -> {:ok, Map.fetch!(page_map, page_id)}
-        end
+      index ->
+        Index.page_for_key(index, key)
     end
   end
 
@@ -226,17 +146,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
     do: {:error, :version_too_new}
 
   def fetch_pages_for_range(index_manager, start_key, end_key, version) do
-    case find_best_version_for_fetch(index_manager.versions, version) do
+    case find_best_index_for_fetch(index_manager.versions, version) do
       nil ->
         {:error, :version_too_old}
 
-      %Index{tree: tree, page_map: page_map} ->
-        pages =
-          tree
-          |> Tree.page_ids_in_range(start_key, end_key)
-          |> Enum.map(&Map.fetch!(page_map, &1))
-
-        {:ok, pages}
+      index ->
+        Index.pages_for_range(index, start_key, end_key)
     end
   end
 
@@ -693,12 +608,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   Finds the best version data for fetch operations using MVCC semantics.
   Returns the latest version that is <= the target version.
   """
-  @spec find_best_version_for_fetch(
+  @spec find_best_index_for_fetch(
           [{Bedrock.version(), version_data()}],
           Bedrock.version()
         ) ::
           version_data() | nil
-  def find_best_version_for_fetch(versions, target_version) do
+  def find_best_index_for_fetch(versions, target_version) do
     find_first_valid_version(versions, target_version)
   end
 
