@@ -92,9 +92,23 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
           | {:error, :version_too_new}
   def fetch(%State{} = t, key, version, opts \\ []) do
     t.index_manager
-    |> IndexManager.fetch_page_for_key(key, version)
+    |> IndexManager.page_for_key(key, version)
     |> case do
-      {:ok, page} -> resolve_fetch_from_page(t, page, key, opts[:reply_fn])
+      {:ok, page} ->
+        load_fn = Database.value_loader(t.database)
+
+        do_now_or_async_with_reply(opts[:reply_fn], fn ->
+          fetch_from_page(page, key, load_fn)
+        end)
+
+      error ->
+        error
+    end
+  end
+
+  defp fetch_from_page(page, key, load_fn) do
+    case Page.version_for_key(page, key) do
+      {:ok, version} -> load_fn.(key, version)
       error -> error
     end
   end
@@ -118,14 +132,30 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
           | {:error, :version_too_new}
   def range_fetch(t, start_key, end_key, version, opts \\ []) do
     t.index_manager
-    |> IndexManager.fetch_pages_for_range(start_key, end_key, version)
+    |> IndexManager.pages_for_range(start_key, end_key, version)
     |> case do
       {:ok, pages} ->
-        resolve_range_from_pages(t, pages, start_key, end_key, opts)
+        load_fn = Database.value_loader(t.database)
+        limit = opts[:limit]
+
+        do_now_or_async_with_reply(opts[:reply_fn], fn ->
+          range_fetch_from_pages(pages, start_key, end_key, limit, load_fn)
+        end)
 
       error ->
         error
     end
+  end
+
+  defp range_fetch_from_pages(pages, start_key, end_key, limit, load_fn) do
+    pages
+    |> Page.stream_key_versions_in_range(start_key, end_key)
+    |> apply_limit(limit)
+    |> Enum.map(fn {key, version} ->
+      {:ok, value} = load_fn.(key, version)
+      {key, value}
+    end)
+    |> then(&{:ok, &1})
   end
 
   defp apply_limit(stream, nil), do: stream
@@ -140,63 +170,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   def add_to_waitlist(%State{} = t, fetch_request, version, reply_fn, timeout_in_ms) do
     {new_waiting, _timeout} = WaitingList.insert(t.waiting_fetches, version, fetch_request, reply_fn, timeout_in_ms)
     %{t | waiting_fetches: new_waiting}
-  end
-
-  defp resolve_fetch_from_page(t, page, key, reply_fn) do
-    load_fn = Database.value_loader(t.database)
-
-    if reply_fn do
-      {:ok, pid} =
-        Task.start(fn ->
-          page
-          |> resolve_fetch_from_page_with_loader(key, load_fn)
-          |> reply_fn.()
-        end)
-
-      {:ok, pid}
-    else
-      resolve_fetch_from_page_with_loader(page, key, load_fn)
-    end
-  end
-
-  defp resolve_fetch_from_page_with_loader(page, key, load_fn) do
-    case Page.find_version_for_key(page, key) do
-      {:ok, found_version} ->
-        load_fn.(key, found_version)
-
-      error ->
-        error
-    end
-  end
-
-  defp resolve_range_from_pages(t, pages, start_key, end_key, opts) do
-    load_fn = Database.value_loader(t.database)
-
-    if reply_fn = opts[:reply_fn] do
-      {:ok, pid} =
-        Task.start(fn ->
-          pages
-          |> resolve_range_from_pages_with_loader(start_key, end_key, opts[:limit], load_fn)
-          |> reply_fn.()
-        end)
-
-      {:ok, pid}
-    else
-      resolve_range_from_pages_with_loader(pages, start_key, end_key, opts[:limit], load_fn)
-    end
-  end
-
-  defp resolve_range_from_pages_with_loader(pages, start_key, end_key, limit, load_fn) do
-    key_value_pairs =
-      pages
-      |> Page.stream_key_versions_in_range(start_key, end_key)
-      |> apply_limit(limit)
-      |> Enum.map(fn {key, version} ->
-        {:ok, value} = load_fn.(key, version)
-        {key, value}
-      end)
-
-    {:ok, key_value_pairs}
   end
 
   @spec notify_waiting_fetches(State.t(), Bedrock.version()) :: State.t()
@@ -319,4 +292,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
       reply_fn.({:error, :shutting_down})
     end)
   end
+
+  #
+
+  defp do_now_or_async_with_reply(nil, fun), do: fun.()
+  defp do_now_or_async_with_reply(reply_fn, fun), do: Task.start(fn -> reply_fn.(fun.()) end)
 end

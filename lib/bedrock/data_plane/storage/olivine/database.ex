@@ -73,9 +73,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
     :ok
   end
 
-  @spec store_page(t(), page_id :: Page.id(), page_binary :: binary()) :: :ok | {:error, term()}
-  def store_page(database, page_id, page_binary) do
-    case :dets.insert(database.dets_storage, {page_id, page_binary}) do
+  @spec store_page(t(), page_id :: Page.id(), page :: Page.t()) :: :ok | {:error, term()}
+  def store_page(database, page_id, page) do
+    case :dets.insert(database.dets_storage, {page_id, page}) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -142,14 +142,35 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Database do
   Store a page in the lookaside buffer for the given version and page_id.
   This is used during transaction application for modified pages within the window.
   """
-  @spec store_page_version(t(), Page.id(), version :: Bedrock.version(), page_binary :: binary()) ::
+  @spec store_page_version(t(), Page.id(), version :: Bedrock.version(), page :: Page.t()) ::
           :ok | {:error, term()}
-  def store_page_version(database, page_id, version, page_binary) do
-    if :ets.insert_new(database.buffer, {{version, {:page, page_id}}, page_binary}) do
+  def store_page_version(database, page_id, version, page) do
+    if :ets.insert_new(database.buffer, {{version, {:page, page_id}}, page}) do
       :ok
     else
       {:error, :already_exists}
     end
+  end
+
+  @doc """
+  Store multiple modified pages in the lookaside buffer for the given version.
+  This is used during transaction application for efficient batch storage of modified pages.
+  """
+  @spec store_modified_pages(t(), version :: Bedrock.version(), pages :: [Page.t()]) ::
+          :ok | {:error, term()}
+  def store_modified_pages(database, version, pages) do
+    Enum.each(pages, fn page ->
+      page_id = Page.id(page)
+
+      case store_page_version(database, page_id, version, page) do
+        :ok -> :ok
+        {:error, reason} -> throw({:error, reason})
+      end
+    end)
+
+    :ok
+  catch
+    {:error, reason} -> {:error, reason}
   end
 
   @doc """

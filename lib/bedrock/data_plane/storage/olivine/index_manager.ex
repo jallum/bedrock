@@ -34,11 +34,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   allowing O(1) access to the last key by reading from that offset to end of binary.
   """
 
-  alias Bedrock.Cluster.Gateway.TransactionBuilder.Tx
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Index
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
-  alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
+  alias Bedrock.DataPlane.Storage.Olivine.IndexUpdate
   alias Bedrock.DataPlane.Transaction
   alias Bedrock.DataPlane.Version
 
@@ -50,6 +49,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   @type operation :: {:set, Bedrock.version()} | :clear
 
   @type version_data :: Index.t()
+  @type version_update_data :: IndexUpdate.t()
 
   @opaque t :: %__MODULE__{
             versions: [{Bedrock.version(), version_data()}],
@@ -101,20 +101,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
     end
   end
 
-  defp add_unique_page_id(id_list, id, acc \\ [])
-  defp add_unique_page_id([], id, acc), do: Enum.reverse(acc, [id])
-  defp add_unique_page_id([h | t], id, acc) when id < h, do: Enum.reverse(acc, [id, h | t])
-  defp add_unique_page_id([h | _t] = list, id, acc) when id == h, do: Enum.reverse(acc, list)
-  defp add_unique_page_id([h | t], id, acc), do: add_unique_page_id(t, id, [h | acc])
-
-  @spec fetch_page_for_key(t(), key :: Bedrock.key(), Bedrock.version()) ::
+  @spec page_for_key(t(), key :: Bedrock.key(), Bedrock.version()) ::
           {:ok, Page.t()}
           | {:error, :not_found}
           | {:error, :version_too_new}
-  def fetch_page_for_key(index_manager, _key, version) when index_manager.current_version < version,
+  def page_for_key(index_manager, _key, version) when index_manager.current_version < version,
     do: {:error, :version_too_new}
 
-  def fetch_page_for_key(index_manager, key, version) do
+  def page_for_key(index_manager, key, version) do
     index_manager.versions
     |> find_best_index_for_fetch(version)
     |> case do
@@ -126,14 +120,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
     end
   end
 
-  @spec fetch_pages_for_range(t(), start_key :: Bedrock.key(), end_key :: Bedrock.key(), Bedrock.version()) ::
+  @spec pages_for_range(t(), start_key :: Bedrock.key(), end_key :: Bedrock.key(), Bedrock.version()) ::
           {:ok, [Page.t()]}
           | {:error, :version_too_new}
           | {:error, :version_too_old}
-  def fetch_pages_for_range(index_manager, _start_key, _end_key, version) when index_manager.current_version < version,
+  def pages_for_range(index_manager, _start_key, _end_key, version) when index_manager.current_version < version,
     do: {:error, :version_too_new}
 
-  def fetch_pages_for_range(index_manager, start_key, end_key, version) do
+  def pages_for_range(index_manager, start_key, end_key, version) do
     case find_best_index_for_fetch(index_manager.versions, version) do
       nil ->
         {:error, :version_too_old}
@@ -146,274 +140,43 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   @spec apply_transactions(index_manager :: t(), encoded_transactions :: [binary()], database :: Database.t()) :: t()
   def apply_transactions(index_manager, [], _database), do: index_manager
 
-  def apply_transactions(index_manager, transactions, database) when is_list(transactions),
-    do:
-      Enum.reduce(transactions, index_manager, fn transaction, vm_acc ->
-        apply_single_transaction(transaction, vm_acc, database)
-      end)
+  def apply_transactions(index_manager, transactions, database) when is_list(transactions) do
+    Enum.reduce(transactions, index_manager, fn transaction, index_manager ->
+      apply_transaction(index_manager, transaction, database)
+    end)
+  end
 
   # Transaction Processing Functions (Phase 3.1)
 
   @doc """
   Applies a single transaction binary to the version manager.
   Creates a new version and applies all mutations in the transaction.
-  """
-  @spec apply_single_transaction(binary(), t(), Database.t()) :: t()
-  def apply_single_transaction(transaction_binary, index_manager, database) do
-    commit_version = Transaction.extract_commit_version!(transaction_binary)
-
-    transaction_binary
-    |> Transaction.stream_mutations!()
-    |> apply_mutations_to_version(commit_version, index_manager, database)
-  end
-
-  @doc """
-  Applies mutations to create a new version state in the version manager.
   Uses a two-pass approach: first collect all instructions, then process each page.
   """
-  @spec apply_mutations_to_version(Enumerable.t(), Bedrock.version(), t(), Database.t()) :: t()
-  def apply_mutations_to_version(mutations, new_version, index_manager, database) do
-    current_page_data = get_current_page_data(index_manager)
+  @spec apply_transaction(t(), binary(), Database.t()) :: t()
+  def apply_transaction(%{versions: [{_version, current_index} | _]} = index_manager, transaction, database) do
+    commit_version = Transaction.extract_commit_version!(transaction)
+    mutations = transaction |> Transaction.stream_mutations!() |> Enum.to_list()
 
-    # Pass 1: Distribute instructions across pages
-    page_data_with_instructions =
-      Enum.reduce(mutations, current_page_data, fn mutation, page_data_acc ->
-        apply_single_mutation(index_manager, mutation, new_version, page_data_acc, database)
-      end)
+    page_allocator = IndexUpdate.PageAllocator.new(index_manager.max_page_id, index_manager.free_page_ids)
 
-    # Pass 2: Process all pending operations for each modified page
-    new_version_data = process_all_pending_operations(index_manager, page_data_with_instructions, new_version)
+    index_update =
+      current_index
+      |> IndexUpdate.new(commit_version, page_allocator)
+      |> IndexUpdate.apply_mutations(mutations, database)
+      |> IndexUpdate.process_pending_operations()
+      |> IndexUpdate.store_modified_pages(database)
 
-    # Pass 3: Store all modified pages in the lookaside buffer for unified persistence
-    store_modified_pages(database, new_version_data)
+    new_index = IndexUpdate.to_index(index_update)
+    updated_allocator = IndexUpdate.to_page_allocator(index_update)
 
     %{
       index_manager
-      | versions: [{new_version, new_version_data} | index_manager.versions],
-        current_version: new_version
+      | versions: [{commit_version, new_index} | index_manager.versions],
+        current_version: commit_version,
+        max_page_id: updated_allocator.max_page_id,
+        free_page_ids: updated_allocator.free_page_ids
     }
-  end
-
-  @spec apply_single_mutation(t(), Tx.mutation(), Bedrock.version(), version_data(), Database.t()) :: version_data()
-  def apply_single_mutation(index_manager, mutation, new_version, page_data, database) do
-    case mutation do
-      {:set, key, value} ->
-        apply_set_mutation(index_manager, key, value, new_version, page_data, database)
-
-      {:clear, key} ->
-        apply_clear_mutation(index_manager, key, new_version, page_data)
-
-      {:clear_range, start_key, end_key} ->
-        apply_range_clear_mutation(index_manager, start_key, end_key, new_version, page_data)
-    end
-  end
-
-  @spec apply_set_mutation(t(), binary(), binary(), Bedrock.version(), version_data(), Database.t()) :: version_data()
-  defp apply_set_mutation(_index_manager, key, value, new_version, %Index{} = page_data, database) do
-    target_page_id = Tree.page_for_insertion(page_data.tree, key)
-
-    # Store the value in database (handles lookaside buffer internally)
-    :ok = Database.store_value(database, key, new_version, value)
-
-    # Add set operation to pending operations for this page (last-writer-wins)
-    set_operation = {:set, new_version}
-
-    updated_operations =
-      Map.update(page_data.pending_operations, target_page_id, %{key => set_operation}, fn page_ops ->
-        Map.put(page_ops, key, set_operation)
-      end)
-
-    %{page_data | pending_operations: updated_operations}
-  end
-
-  @spec apply_clear_mutation(t(), binary(), Bedrock.version(), version_data()) :: version_data()
-  defp apply_clear_mutation(_index_manager, key, _new_version, %Index{} = page_data) do
-    case Tree.page_for_key(page_data.tree, key) do
-      nil ->
-        # Key doesn't exist, no operation needed
-        page_data
-
-      page_id ->
-        # Add clear operation to pending operations for this page (last-writer-wins)
-        clear_operation = :clear
-
-        updated_operations =
-          Map.update(page_data.pending_operations, page_id, %{key => clear_operation}, fn page_ops ->
-            Map.put(page_ops, key, clear_operation)
-          end)
-
-        %{page_data | pending_operations: updated_operations}
-    end
-  end
-
-  @spec apply_range_clear_mutation(t(), binary(), binary(), Bedrock.version(), version_data()) :: version_data()
-  defp apply_range_clear_mutation(_index_manager, start_key, end_key, _new_version, %Index{} = page_data) do
-    overlapping_page_ids = Tree.page_ids_in_range(page_data.tree, start_key, end_key)
-
-    case overlapping_page_ids do
-      [] ->
-        # No pages in range, nothing to do
-        page_data
-
-      [single_page_id] ->
-        # Only one page overlaps, expand range to individual clear operations
-        page = Map.fetch!(page_data.page_map, single_page_id)
-        keys_to_clear = get_keys_in_range(page, start_key, end_key)
-
-        # Add individual clear operations for each key in range
-        updated_operations = add_clear_operations(page_data.pending_operations, single_page_id, keys_to_clear)
-
-        %{page_data | pending_operations: updated_operations}
-
-      multiple_page_ids ->
-        # Multiple pages: first and last get individual clears for keys in range, middle pages get deleted
-        first_page_id = List.first(multiple_page_ids)
-        last_page_id = List.last(multiple_page_ids)
-        middle_page_ids = multiple_page_ids |> Enum.drop(1) |> Enum.drop(-1)
-
-        # Handle first page - get keys from start_key to end of page
-        first_page = Map.fetch!(page_data.page_map, first_page_id)
-        first_page_end_key = Page.right_key(first_page)
-        first_clear_end = min(end_key, first_page_end_key || end_key)
-        first_keys_to_clear = get_keys_in_range(first_page, start_key, first_clear_end)
-
-        # Handle last page - get keys from start of page to end_key
-        last_page = Map.fetch!(page_data.page_map, last_page_id)
-        last_page_start_key = Page.left_key(last_page)
-        last_clear_start = max(start_key, last_page_start_key || start_key)
-        last_keys_to_clear = get_keys_in_range(last_page, last_clear_start, end_key)
-
-        # Remove middle pages immediately and clean up their pending operations
-        updated_tree =
-          Enum.reduce(middle_page_ids, page_data.tree, fn page_id, tree_acc ->
-            page = Map.fetch!(page_data.page_map, page_id)
-            Tree.remove_page_from_tree(tree_acc, page)
-          end)
-
-        updated_page_map =
-          Enum.reduce(middle_page_ids, page_data.page_map, fn page_id, map_acc ->
-            Map.delete(map_acc, page_id)
-          end)
-
-        # Since both lists are sorted, we can merge efficiently
-        updated_deleted_page_ids = merge_sorted_unique(page_data.deleted_page_ids, middle_page_ids)
-
-        updated_operations =
-          page_data.pending_operations
-          |> Map.drop(middle_page_ids)
-          |> add_clear_operations(first_page_id, first_keys_to_clear)
-          |> add_clear_operations(last_page_id, last_keys_to_clear)
-
-        %{
-          page_data
-          | tree: updated_tree,
-            page_map: updated_page_map,
-            deleted_page_ids: updated_deleted_page_ids,
-            pending_operations: updated_operations
-        }
-    end
-  end
-
-  # Helper function to get keys within a range from a page
-  @spec get_keys_in_range(Page.t(), Bedrock.key(), Bedrock.key()) :: [Bedrock.key()]
-  defp get_keys_in_range(page_binary, start_key, end_key) do
-    page_binary
-    |> Page.key_versions()
-    |> Enum.filter(fn {key, _version} -> key >= start_key and key <= end_key end)
-    |> Enum.map(fn {key, _version} -> key end)
-  end
-
-  @spec process_all_pending_operations(t(), version_data(), Bedrock.version()) :: version_data()
-  defp process_all_pending_operations(index_manager, %Index{} = page_data, new_version) do
-    # Process each page that has pending operations using sorted merge
-    page_data.pending_operations
-    |> Enum.reduce(page_data, fn {page_id, operations}, page_data_acc ->
-      process_page_operations(index_manager, page_data_acc, page_id, operations, new_version)
-    end)
-    |> clear_all_pending_operations()
-  end
-
-  @spec process_page_operations(t(), version_data(), page_id(), %{Bedrock.key() => operation()}, Bedrock.version()) ::
-          version_data()
-  defp process_page_operations(index_manager, %Index{} = page_data, page_id, operations, _new_version) do
-    page_binary = Map.fetch!(page_data.page_map, page_id)
-
-    # Apply operations and encode directly to binary (no intermediate struct)
-    updated_page_binary = Page.apply_operations(page_binary, operations)
-
-    # Handle page updates, splitting, or deletion
-    cond do
-      Page.empty?(updated_page_binary) ->
-        # Page is now empty, remove it
-        %{
-          page_data
-          | tree: Tree.remove_page_from_tree(page_data.tree, page_binary),
-            page_map: Map.delete(page_data.page_map, page_id),
-            deleted_page_ids: add_unique_page_id(page_data.deleted_page_ids, page_id)
-        }
-
-      Page.key_count(updated_page_binary) > 256 ->
-        # Page needs splitting
-        handle_page_split(index_manager, page_data, page_id, page_binary, updated_page_binary)
-
-      true ->
-        # Normal page update
-        %{
-          page_data
-          | tree: Tree.update_page_in_tree(page_data.tree, page_binary, updated_page_binary),
-            page_map: Map.put(page_data.page_map, page_id, updated_page_binary),
-            modified_page_ids: add_unique_page_id(page_data.modified_page_ids, page_id)
-        }
-    end
-  end
-
-  @spec handle_page_split(t(), version_data(), page_id(), binary(), binary()) :: version_data()
-  defp handle_page_split(index_manager, %Index{} = page_data, page_id, original_page_binary, updated_page_binary) do
-    # Split the page directly using binary format
-    {{left_page_binary, right_page_binary}, _updated_vm} = split_page_binary(updated_page_binary, index_manager)
-
-    updated_tree =
-      page_data.tree
-      |> Tree.remove_page_from_tree(original_page_binary)
-      |> Tree.add_page_to_tree(left_page_binary)
-      |> Tree.add_page_to_tree(right_page_binary)
-
-    updated_page_map =
-      page_data.page_map
-      |> Map.put(Page.id(left_page_binary), left_page_binary)
-      |> Map.put(Page.id(right_page_binary), right_page_binary)
-      |> then(fn map ->
-        if not Page.has_id?(left_page_binary, page_id) and not Page.has_id?(right_page_binary, page_id) do
-          Map.delete(map, page_id)
-        else
-          map
-        end
-      end)
-
-    split_deleted_pages =
-      if not Page.has_id?(left_page_binary, page_id) and not Page.has_id?(right_page_binary, page_id) do
-        add_unique_page_id(page_data.deleted_page_ids, page_id)
-      else
-        page_data.deleted_page_ids
-      end
-
-    updated_modified_page_ids =
-      page_data.modified_page_ids
-      |> add_unique_page_id(Page.id(left_page_binary))
-      |> add_unique_page_id(Page.id(right_page_binary))
-
-    %{
-      page_data
-      | tree: updated_tree,
-        page_map: updated_page_map,
-        deleted_page_ids: split_deleted_pages,
-        modified_page_ids: updated_modified_page_ids
-    }
-  end
-
-  @spec clear_all_pending_operations(version_data()) :: version_data()
-  defp clear_all_pending_operations(%Index{} = page_data) do
-    %{page_data | pending_operations: %{}}
   end
 
   # Helper Functions
@@ -482,15 +245,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
 
         {:evict, new_durable_version, evicted_versions, %{index_manager | versions: versions_to_keep}}
     end
-  end
-
-  # Store all modified pages in the lookaside buffer for unified persistence
-  defp store_modified_pages(database, %Index{} = page_data) do
-    page_data.page_map
-    |> Map.take(page_data.modified_page_ids)
-    |> Enum.each(fn {page_id, page} ->
-      :ok = Database.store_page(database, page_id, page)
-    end)
   end
 
   # Persistence is now handled by Database.extract_deduplicated_persistence_data - much simpler and more efficient!
@@ -614,124 +368,4 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
       data
     end
   end
-
-  @spec split_page_with_tree_update(page :: Page.t(), index_manager :: t()) ::
-          {{Page.t(), Page.t()}, t()} | {:error, :no_split_needed}
-  def split_page_with_tree_update(page, index_manager) do
-    case split_page_simple(page, index_manager) do
-      {:error, :no_split_needed} = error ->
-        error
-
-      {{left_page, right_page}, updated_vm} ->
-        case updated_vm.versions do
-          [] ->
-            {{left_page, right_page}, updated_vm}
-
-          [{current_version, %Index{} = version_data} | rest_versions] ->
-            tree =
-              version_data.tree
-              |> Tree.remove_page_from_tree(page)
-              |> Tree.add_page_to_tree(left_page)
-              |> Tree.add_page_to_tree(right_page)
-
-            updated_version_data = %{version_data | tree: tree}
-            updated_versions = [{current_version, updated_version_data} | rest_versions]
-
-            final_vm = %{updated_vm | versions: updated_versions}
-
-            {{left_page, right_page}, final_vm}
-        end
-    end
-  end
-
-  @doc """
-  Gets the current tree from the version manager.
-  Always returns the tree from the top of the versions list.
-  The versions list should always be available and prepared in recover_from_database.
-  """
-  @spec get_current_tree(t()) :: :gb_trees.tree()
-  def get_current_tree(%__MODULE__{versions: []}),
-    do: raise("Invalid state: version manager has no versions - this indicates a bug in recovery or initialization")
-
-  def get_current_tree(%__MODULE__{versions: [{_version, %Index{tree: tree}} | _]}), do: tree
-
-  # Lookaside buffer management functions have been moved to Database module
-
-  @doc """
-  Gets the current complete page_data tuple from the version manager.
-  Always returns the page_data from the top of the versions list.
-  The versions list should always be available and prepared in recover_from_database.
-  """
-  @spec get_current_page_data(t()) :: version_data()
-  def get_current_page_data(index_manager) do
-    case index_manager.versions do
-      [] ->
-        raise "Invalid state: version manager has no versions - this indicates a bug in recovery or initialization"
-
-      [{_version, page_data} | _] ->
-        page_data
-    end
-  end
-
-  # Page management functions moved from Page module
-
-  @spec split_page_simple(Page.t(), t()) :: {{Page.t(), Page.t()}, t()} | {:error, :no_split_needed}
-  defp split_page_simple(page, index_manager) when length(page.key_versions) > 256 do
-    key_versions = page.key_versions
-    mid_point = div(length(key_versions), 2)
-
-    {left_key_versions, right_key_versions} = Enum.split(key_versions, mid_point)
-
-    updated_vm = %{index_manager | max_page_id: max(index_manager.max_page_id, page.id)}
-    {right_id, vm1} = next_id_from_vm(updated_vm)
-
-    left_id = page.id
-
-    left_page = Page.new(left_id, left_key_versions, right_id)
-    right_page = Page.new(right_id, right_key_versions, page.next_id)
-
-    {{left_page, right_page}, vm1}
-  end
-
-  defp split_page_simple(_page, _index_manager), do: {:error, :no_split_needed}
-
-  # Binary-optimized page splitting using Page.split_page/3
-  @spec split_page_binary(binary(), t()) :: {{binary(), binary()}, t()} | {:error, :no_split_needed}
-  defp split_page_binary(page_binary, index_manager) do
-    case Page.key_count(page_binary) do
-      key_count when key_count > 256 ->
-        {new_page_id, index_manager} = next_id_from_vm(index_manager)
-
-        {Page.split_page(page_binary, div(key_count, 2), new_page_id), index_manager}
-
-      _ ->
-        {:error, :no_split_needed}
-    end
-  end
-
-  defp next_id_from_vm(index_manager) do
-    case index_manager.free_page_ids do
-      [id | rest] ->
-        {id, %{index_manager | free_page_ids: rest}}
-
-      [] ->
-        new_id = index_manager.max_page_id + 1
-        {new_id, %{index_manager | max_page_id: new_id}}
-    end
-  end
-
-  # Helper function to add clear operations for keys on a specific page
-  defp add_clear_operations(operations, page_id, keys_to_clear) do
-    Enum.reduce(keys_to_clear, operations, fn key, ops_acc ->
-      Map.update(ops_acc, page_id, %{key => :clear}, &Map.put(&1, key, :clear))
-    end)
-  end
-
-  defp merge_sorted_unique(list1, list2), do: merge_sorted_unique(list1, list2, [])
-
-  defp merge_sorted_unique([h1 | t1], [h2 | t2], acc) when h1 < h2, do: merge_sorted_unique(t1, [h2 | t2], [h1 | acc])
-  defp merge_sorted_unique([h1 | t1], [h2 | t2], acc) when h1 > h2, do: merge_sorted_unique([h1 | t1], t2, [h2 | acc])
-  defp merge_sorted_unique([h | t1], [h | t2], acc), do: merge_sorted_unique(t1, t2, [h | acc])
-  defp merge_sorted_unique([], list2, acc), do: Enum.reverse(acc, list2)
-  defp merge_sorted_unique(list1, [], acc), do: Enum.reverse(acc, list1)
 end

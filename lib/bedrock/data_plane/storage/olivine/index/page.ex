@@ -35,9 +35,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.Page do
   end
 
   @spec from_map(t()) :: binary()
-  def from_map(%{key_versions: key_versions, id: id, next_id: next_id}) do
-    encode_page_direct(id, next_id, key_versions)
-  end
+  def from_map(%{key_versions: key_versions, id: id, next_id: next_id}),
+    do: encode_page_direct(id, next_id, key_versions)
 
   def from_map(binary) when is_binary(binary), do: binary
 
@@ -95,8 +94,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.Page do
       payload::binary
     >> = page
 
-    {parts, key_count_delta, last_key_info} = do_apply_operations(payload, Enum.sort(operations), 16, [16], 0)
-    new_payload = convert_parts_to_iodata(parts, page, [])
+    {parts, key_count_delta, last_key_info} =
+      do_apply_operations(payload, Enum.sort_by(operations, &elem(&1, 0)), 16, [16], 0)
+
+    new_payload = convert_parts_to_iodata(parts, page)
 
     new_last_key_offset =
       case last_key_info do
@@ -113,6 +114,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.Page do
   end
 
   # Convert parts list to iodata, processing in reverse order to get correct sequence
+  defp convert_parts_to_iodata(parts, page, acc \\ [])
+
   defp convert_parts_to_iodata([part | rest], page, acc) do
     binary_part =
       case part do
@@ -212,13 +215,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.Page do
     )
   end
 
-  defp add_remaining_operations_as_parts([], acc, key_count_delta) do
-    if acc == [] and key_count_delta < 0 do
-      {acc, key_count_delta, :no_last_key}
-    else
-      {acc, key_count_delta, :unchanged}
-    end
-  end
+  defp add_remaining_operations_as_parts([], [16], key_count_delta), do: {[], key_count_delta, :no_last_key}
+  defp add_remaining_operations_as_parts([], acc, key_count_delta), do: {acc, key_count_delta, :unchanged}
 
   # Helper that tracks the last key length when processing remaining operations
   defp add_remaining_operations_as_parts_with_last_key([{_key, :clear} | tail], acc, key_count_delta, last_key_len),
@@ -357,18 +355,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.Page do
     key
   end
 
-  @spec find_version_for_key(t(), Bedrock.key()) :: {:ok, Bedrock.version()} | {:error, :not_found}
-  def find_version_for_key(page, key) when is_binary(page), do: find_key_in_binary(page, key)
-
-  # Helper to search for a key in binary format
-  @spec find_key_in_binary(binary(), Bedrock.key()) :: {:ok, Bedrock.version()} | {:error, :not_found} | :not_found
-  defp find_key_in_binary(
-         <<_page_id::unsigned-big-32, _next_id::unsigned-big-32, key_count::unsigned-big-16,
-           _last_key_offset::unsigned-big-32, _reserved::unsigned-big-16, entries_data::binary>>,
-         target_key
-       ) do
-    search_entries_for_key(entries_data, key_count, target_key)
-  end
+  @spec version_for_key(t(), Bedrock.key()) :: {:ok, Bedrock.version()} | {:error, :not_found}
+  def version_for_key(
+        <<_page_id::unsigned-big-32, _next_id::unsigned-big-32, key_count::unsigned-big-16,
+          _last_key_offset::unsigned-big-32, _reserved::unsigned-big-16, entries_data::binary>>,
+        target_key
+      ),
+      do: search_entries_for_key(entries_data, key_count, target_key)
 
   @spec search_entries_for_key(binary(), non_neg_integer(), Bedrock.key()) ::
           {:ok, Bedrock.version()} | {:error, :not_found}
@@ -404,7 +397,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.Page do
   """
   @spec has_key?(t() | binary(), Bedrock.key()) :: boolean()
   def has_key?(page, key) when is_binary(page) do
-    case find_key_in_binary(page, key) do
+    case version_for_key(page, key) do
       {:ok, _version} -> true
       _ -> false
     end

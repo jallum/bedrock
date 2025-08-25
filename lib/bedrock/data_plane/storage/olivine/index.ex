@@ -10,18 +10,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
 
   @type t :: %__MODULE__{
           tree: :gb_trees.tree(),
-          page_map: map(),
-          deleted_page_ids: [Page.id()],
-          modified_page_ids: [Page.id()],
-          pending_operations: %{Page.id() => %{Bedrock.key() => operation()}}
+          page_map: map()
         }
 
   defstruct [
     :tree,
-    :page_map,
-    :deleted_page_ids,
-    :modified_page_ids,
-    :pending_operations
+    :page_map
   ]
 
   @doc """
@@ -35,10 +29,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
 
     %__MODULE__{
       tree: initial_tree,
-      page_map: initial_page_map,
-      deleted_page_ids: [],
-      modified_page_ids: [],
-      pending_operations: %{}
+      page_map: initial_page_map
     }
   end
 
@@ -66,10 +57,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
 
         index = %__MODULE__{
           tree: tree,
-          page_map: initial_page_map,
-          deleted_page_ids: [],
-          modified_page_ids: [],
-          pending_operations: %{}
+          page_map: initial_page_map
         }
 
         {:ok, index, max_page_id, free_page_ids}
@@ -89,7 +77,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
          :ok <- Page.validate(page) do
       page_map
       |> Map.put(page_id, page)
-      |> continue_page_chain(database, page)
+      |> load_next_page_in_chain(database, page)
     else
       {:error, :not_found} when page_id == 0 ->
         {:error, :no_chain}
@@ -99,7 +87,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
     end
   end
 
-  defp continue_page_chain(page_map, database, page) do
+  defp load_next_page_in_chain(page_map, database, page) do
     case Page.next_id(page) do
       0 -> {:ok, page_map}
       next_id -> load_page_chain(database, next_id, page_map)
