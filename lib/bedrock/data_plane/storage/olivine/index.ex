@@ -104,6 +104,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   end
 
   @doc """
+  Gets a page by its ID from the index.
+  Raises if the page is not found.
+  """
+  @spec get_page!(t(), Page.id()) :: Page.t()
+  def get_page!(%__MODULE__{page_map: page_map}, page_id), do: Map.fetch!(page_map, page_id)
+
+  @doc """
   Finds the page containing the given key in this index.
   Returns {:ok, Page.t()} if found, {:error, :not_found} if not found.
   """
@@ -127,6 +134,65 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
      tree
      |> Tree.page_ids_in_range(start_key, end_key)
      |> Enum.map(&Map.fetch!(page_map, &1))}
+  end
+
+  @doc """
+  Removes a single page from the index.
+  Updates both the tree structure and page_map.
+  Returns the updated index.
+  """
+  @spec delete_page(t(), Page.id()) :: t()
+  def delete_page(%__MODULE__{tree: tree, page_map: page_map} = index, page_id) do
+    case Map.fetch(page_map, page_id) do
+      {:ok, page} ->
+        updated_tree = Tree.remove_page_from_tree(tree, page)
+        updated_page_map = Map.delete(page_map, page_id)
+        %{index | tree: updated_tree, page_map: updated_page_map}
+
+      :error ->
+        index
+    end
+  end
+
+  @doc """
+  Updates a page in the index with a new version.
+  Updates both the tree structure and page_map.
+  Returns the updated index.
+  """
+  @spec update_page(t(), Page.t(), Page.t()) :: t()
+  def update_page(%__MODULE__{tree: tree, page_map: page_map} = index, old_page, new_page) do
+    updated_tree = Tree.update_page_in_tree(tree, old_page, new_page)
+    updated_page_map = Map.put(page_map, Page.id(new_page), new_page)
+    %{index | tree: updated_tree, page_map: updated_page_map}
+  end
+
+  @doc """
+  Splits a page in the index when it becomes too large.
+  First deletes the original page, then adds the split pages.
+  Returns the updated index.
+  """
+  @spec split_page(t(), Page.t(), Page.id()) :: t()
+  def split_page(index, updated_page, right_page_id) do
+    # Split the page using binary format
+    key_count = Page.key_count(updated_page)
+    {left_page, right_page} = Page.split_page(updated_page, div(key_count, 2), right_page_id)
+
+    # Add both split pages to the index
+    index
+    |> add_page(left_page)
+    |> add_page(right_page)
+  end
+
+  @doc """
+  Adds a page to the index.
+  Updates both the tree structure and page_map.
+  Returns the updated index.
+  """
+  @spec add_page(t(), Page.t()) :: t()
+  def add_page(%__MODULE__{tree: tree, page_map: page_map} = index, page) do
+    updated_tree = Tree.add_page_to_tree(tree, page)
+    updated_page_map = Map.put(page_map, Page.id(page), page)
+    %{index | tree: updated_tree, page_map: updated_page_map}
   end
 
   @doc """

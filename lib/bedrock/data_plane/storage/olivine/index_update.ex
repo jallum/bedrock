@@ -66,7 +66,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
           index: Index.t(),
           version: Bedrock.version(),
           page_allocator: PageAllocator.t(),
-          modified_page_ids: [Page.id()],
+          modified_page_ids: MapSet.t(Page.id()),
           pending_operations: %{Page.id() => %{Bedrock.key() => {:set, Bedrock.version()} | :clear}}
         }
 
@@ -87,7 +87,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
       index: index,
       version: version,
       page_allocator: page_allocator,
-      modified_page_ids: [],
+      modified_page_ids: MapSet.new(),
       pending_operations: %{}
     }
   end
@@ -110,7 +110,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
   @spec modified_pages(t()) :: [Page.t()]
   def modified_pages(%__MODULE__{index: index, modified_page_ids: modified_page_ids}) do
     Enum.map(modified_page_ids, fn page_id ->
-      Map.fetch!(index.page_map, page_id)
+      Index.get_page!(index, page_id)
     end)
   end
 
@@ -203,7 +203,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
         update_data
 
       [single_page_id] ->
-        page = Map.fetch!(update_data.index.page_map, single_page_id)
+        page = Index.get_page!(update_data.index, single_page_id)
         keys_to_clear = get_keys_in_range(page, start_key, end_key)
 
         %{
@@ -214,10 +214,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
       [first_page_id | remaining_page_ids] ->
         {middle_page_ids, [last_page_id]} = Enum.split(remaining_page_ids, -1)
 
-        first_page = Map.fetch!(update_data.index.page_map, first_page_id)
+        first_page = Index.get_page!(update_data.index, first_page_id)
         first_keys_to_clear = get_keys_in_range(first_page, start_key, Page.right_key(first_page))
 
-        last_page = Map.fetch!(update_data.index.page_map, last_page_id)
+        last_page = Index.get_page!(update_data.index, last_page_id)
         last_keys_to_clear = get_keys_in_range(last_page, Page.left_key(last_page), end_key)
 
         %{
@@ -255,101 +255,43 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
 
   @spec process_page_operations(t(), Page.id(), %{Bedrock.key() => {:set, Bedrock.version()} | :clear}) :: t()
   defp process_page_operations(%__MODULE__{} = update_data, page_id, operations) do
-    page_binary = Map.fetch!(update_data.index.page_map, page_id)
+    page = Index.get_page!(update_data.index, page_id)
+    updated_page = Page.apply_operations(page, operations)
 
-    # Apply operations and encode directly to binary (no intermediate struct)
-    updated_page_binary = Page.apply_operations(page_binary, operations)
-
-    # Handle page updates, splitting, or deletion
     cond do
-      Page.empty?(updated_page_binary) ->
-        # Page is now empty, remove it and recycle the page ID
-        updated_index = %{
-          update_data.index
-          | tree: Tree.remove_page_from_tree(update_data.index.tree, page_binary),
-            page_map: Map.delete(update_data.index.page_map, page_id)
+      Page.empty?(updated_page) ->
+        %{
+          update_data
+          | index: Index.delete_page(update_data.index, page_id),
+            page_allocator: PageAllocator.recycle_page_id(update_data.page_allocator, page_id)
         }
 
-        updated_allocator = PageAllocator.recycle_page_id(update_data.page_allocator, page_id)
+      Page.key_count(updated_page) > 256 ->
+        # Allocate new page ID and split the page
+        {right_page_id, updated_allocator} = PageAllocator.allocate_id(update_data.page_allocator)
+
+        updated_index =
+          update_data.index
+          |> Index.delete_page(page_id)
+          |> Index.split_page(updated_page, right_page_id)
 
         %{
           update_data
           | index: updated_index,
-            page_allocator: updated_allocator
+            page_allocator: updated_allocator,
+            modified_page_ids:
+              update_data.modified_page_ids
+              # left page keeps original ID
+              |> MapSet.put(page_id)
+              |> MapSet.put(right_page_id)
         }
-
-      Page.key_count(updated_page_binary) > 256 ->
-        # Page needs splitting
-        handle_page_split(update_data, page_id, page_binary, updated_page_binary)
 
       true ->
-        # Normal page update
-        updated_index = %{
-          update_data.index
-          | tree: Tree.update_page_in_tree(update_data.index.tree, page_binary, updated_page_binary),
-            page_map: Map.put(update_data.index.page_map, page_id, updated_page_binary)
-        }
-
         %{
           update_data
-          | index: updated_index,
-            modified_page_ids: add_unique_page_id(update_data.modified_page_ids, page_id)
+          | index: Index.update_page(update_data.index, page, updated_page),
+            modified_page_ids: MapSet.put(update_data.modified_page_ids, page_id)
         }
     end
-  end
-
-  # Helper function that delegates to PageAllocator's add_unique_page_id
-  @spec add_unique_page_id([Page.id()], Page.id()) :: [Page.id()]
-  defp add_unique_page_id(id_list, id) do
-    PageAllocator.add_unique_page_id(id_list, id)
-  end
-
-  @spec handle_page_split(t(), Page.id(), Page.t(), Page.t()) :: t()
-  defp handle_page_split(%__MODULE__{} = update_data, page_id, original_page_binary, updated_page_binary) do
-    # Split the page using binary format
-    key_count = Page.key_count(updated_page_binary)
-    {new_page_id, updated_allocator} = PageAllocator.allocate_id(update_data.page_allocator)
-
-    {left_page_binary, right_page_binary} = Page.split_page(updated_page_binary, div(key_count, 2), new_page_id)
-
-    updated_tree =
-      update_data.index.tree
-      |> Tree.remove_page_from_tree(original_page_binary)
-      |> Tree.add_page_to_tree(left_page_binary)
-      |> Tree.add_page_to_tree(right_page_binary)
-
-    updated_page_map =
-      update_data.index.page_map
-      |> Map.put(Page.id(left_page_binary), left_page_binary)
-      |> Map.put(Page.id(right_page_binary), right_page_binary)
-      |> then(fn map ->
-        if not Page.has_id?(left_page_binary, page_id) and not Page.has_id?(right_page_binary, page_id) do
-          Map.delete(map, page_id)
-        else
-          map
-        end
-      end)
-
-    # If the original page ID is not reused in either split page, recycle it
-    final_allocator =
-      if not Page.has_id?(left_page_binary, page_id) and not Page.has_id?(right_page_binary, page_id) do
-        PageAllocator.recycle_page_id(updated_allocator, page_id)
-      else
-        updated_allocator
-      end
-
-    updated_modified_page_ids =
-      update_data.modified_page_ids
-      |> add_unique_page_id(Page.id(left_page_binary))
-      |> add_unique_page_id(Page.id(right_page_binary))
-
-    updated_index = %{update_data.index | tree: updated_tree, page_map: updated_page_map}
-
-    %{
-      update_data
-      | index: updated_index,
-        page_allocator: final_allocator,
-        modified_page_ids: updated_modified_page_ids
-    }
   end
 end
