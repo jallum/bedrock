@@ -9,58 +9,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
   alias Bedrock.DataPlane.Storage.Olivine.Index
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
-
-  defmodule PageAllocator do
-    @moduledoc """
-    Manages page ID allocation during index updates.
-    """
-
-    @type t :: %__MODULE__{
-            max_page_id: Page.id(),
-            free_page_ids: [Page.id()]
-          }
-
-    defstruct [:max_page_id, :free_page_ids]
-
-    @spec new(Page.id(), [Page.id()]) :: t()
-    def new(max_page_id, free_page_ids) do
-      %__MODULE__{max_page_id: max_page_id, free_page_ids: free_page_ids}
-    end
-
-    @spec allocate_id(t()) :: {Page.id(), t()}
-    def allocate_id(%__MODULE__{free_page_ids: [id | rest]} = allocator) do
-      {id, %{allocator | free_page_ids: rest}}
-    end
-
-    def allocate_id(%__MODULE__{free_page_ids: [], max_page_id: max_id} = allocator) do
-      new_id = max_id + 1
-      {new_id, %{allocator | max_page_id: new_id}}
-    end
-
-    @spec recycle_page_id(t(), Page.id()) :: t()
-    def recycle_page_id(%__MODULE__{free_page_ids: free_ids} = allocator, page_id) do
-      # Add to free list if not already present (maintain sorted order for efficiency)
-      updated_free_ids = add_unique_page_id(free_ids, page_id)
-      %{allocator | free_page_ids: updated_free_ids}
-    end
-
-    @spec recycle_page_ids(t(), [Page.id()]) :: t()
-    def recycle_page_ids(%__MODULE__{} = allocator, page_ids) do
-      Enum.reduce(page_ids, allocator, fn page_id, acc_allocator ->
-        recycle_page_id(acc_allocator, page_id)
-      end)
-    end
-
-    # Helper function for maintaining sorted unique list of free page IDs
-    @spec add_unique_page_id([Page.id()], Page.id()) :: [Page.id()]
-    def add_unique_page_id(id_list, id), do: add_unique_page_id(id_list, id, [])
-
-    @spec add_unique_page_id([Page.id()], Page.id(), [Page.id()]) :: [Page.id()]
-    defp add_unique_page_id([], id, acc), do: Enum.reverse(acc, [id])
-    defp add_unique_page_id([h | t], id, acc) when id < h, do: Enum.reverse(acc, [id, h | t])
-    defp add_unique_page_id([h | _t] = list, id, acc) when id == h, do: Enum.reverse(acc, list)
-    defp add_unique_page_id([h | t], id, acc), do: add_unique_page_id(t, id, [h | acc])
-  end
+  alias Bedrock.DataPlane.Storage.Olivine.PageAllocator
 
   @type t :: %__MODULE__{
           index: Index.t(),
@@ -93,26 +42,16 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
   end
 
   @doc """
-  Extracts the final Index from an IndexUpdate, discarding mutation tracking.
+  Finishes the IndexUpdate, returning the final Index and PageAllocator.
   """
-  @spec to_index(t()) :: Index.t()
-  def to_index(%__MODULE__{index: index}), do: index
-
-  @doc """
-  Extracts the PageAllocator from an IndexUpdate.
-  """
-  @spec to_page_allocator(t()) :: PageAllocator.t()
-  def to_page_allocator(%__MODULE__{page_allocator: page_allocator}), do: page_allocator
+  def finish(%__MODULE__{index: index, page_allocator: page_allocator}), do: {index, page_allocator}
 
   @doc """
   Gets the modified pages from the IndexUpdate as a list of pages.
   """
   @spec modified_pages(t()) :: [Page.t()]
-  def modified_pages(%__MODULE__{index: index, modified_page_ids: modified_page_ids}) do
-    Enum.map(modified_page_ids, fn page_id ->
-      Index.get_page!(index, page_id)
-    end)
-  end
+  def modified_pages(%__MODULE__{index: index, modified_page_ids: modified_page_ids}),
+    do: Enum.map(modified_page_ids, &Index.get_page!(index, &1))
 
   @doc """
   Stores all modified pages from the IndexUpdate in the database.
@@ -128,7 +67,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
   @doc """
   Applies mutations to this IndexUpdate, returning the updated IndexUpdate.
   """
-  @spec apply_mutations(t(), [Tx.mutation()], Database.t()) :: t()
+  @spec apply_mutations(t(), Enumerable.t(Tx.mutation()), Database.t()) :: t()
   def apply_mutations(%__MODULE__{version: version} = update, mutations, database) do
     Enum.reduce(mutations, update, fn mutation, update_acc ->
       apply_single_mutation(mutation, version, update_acc, database)

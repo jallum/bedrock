@@ -4,6 +4,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
+  alias Bedrock.DataPlane.Storage.Olivine.PageAllocator
   alias Bedrock.DataPlane.Storage.Olivine.PageTestHelpers
   alias Bedrock.DataPlane.Transaction
   alias Bedrock.DataPlane.Version
@@ -42,43 +43,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
   describe "basic functionality" do
     test "new/0 creates a new version manager" do
       vm = IndexManager.new()
-      assert vm.max_page_id == 0
-      assert vm.free_page_ids == []
+      assert vm.page_allocator.max_page_id == 0
+      assert vm.page_allocator.free_page_ids == []
       assert vm.current_version == Version.zero()
     end
 
-    test "next_id/1 allocates new page IDs sequentially" do
-      vm = IndexManager.new()
-
-      {page_id_1, vm1} = IndexManager.next_id(vm)
-      assert page_id_1 == 1
-      assert vm1.max_page_id == 1
-
-      {page_id_2, vm2} = IndexManager.next_id(vm1)
-      assert page_id_2 == 2
-      assert vm2.max_page_id == 2
-    end
-
-    test "next_id/1 reuses free page IDs before allocating new ones" do
-      vm = %{IndexManager.new() | free_page_ids: [5, 3], max_page_id: 10}
-
-      {page_id_1, vm1} = IndexManager.next_id(vm)
-      assert page_id_1 == 5
-      assert vm1.free_page_ids == [3]
-      assert vm1.max_page_id == 10
-
-      {page_id_2, vm2} = IndexManager.next_id(vm1)
-      assert page_id_2 == 3
-      assert vm2.free_page_ids == []
-      assert vm2.max_page_id == 10
-
-      {page_id_3, vm3} = IndexManager.next_id(vm2)
-      assert page_id_3 == 11
-      assert vm3.max_page_id == 11
-    end
-
     test "info/2 returns page management information" do
-      vm = %{IndexManager.new() | max_page_id: 42, free_page_ids: [1, 3, 5]}
+      page_allocator = PageAllocator.new(42, [1, 3, 5])
+      vm = %{IndexManager.new() | page_allocator: page_allocator}
 
       assert IndexManager.info(vm, :max_page_id) == 42
       assert IndexManager.info(vm, :free_page_ids) == [1, 3, 5]

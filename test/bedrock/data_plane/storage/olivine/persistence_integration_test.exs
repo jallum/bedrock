@@ -38,8 +38,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert state.index_manager
 
       vm = state.index_manager
-      assert vm.max_page_id == 0
-      assert vm.free_page_ids == []
+      assert vm.page_allocator.max_page_id == 0
+      assert vm.page_allocator.free_page_ids == []
       assert vm.current_version == Version.zero()
       assert {:ok, version} = Database.load_durable_version(state.database)
       assert version == Version.zero()
@@ -73,8 +73,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       {:ok, state} = Logic.startup(:test_recovery, self(), :test_id, tmp_dir)
 
       vm = state.index_manager
-      assert vm.max_page_id == 5
-      assert Enum.sort(vm.free_page_ids) == [1, 3, 4]
+      assert vm.page_allocator.max_page_id == 5
+      assert Enum.sort(vm.page_allocator.free_page_ids) == [1, 3, 4]
 
       {:ok, val1} = Database.load_value(state.database, <<"key1">>)
       assert val1 == <<"value1">>
@@ -147,8 +147,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       assert recovery_time < 1000
 
       vm = state.index_manager
-      assert vm.max_page_id == 49
-      assert vm.free_page_ids == []
+      assert vm.page_allocator.max_page_id == 49
+      assert vm.page_allocator.free_page_ids == []
 
       {:ok, val1} = Database.load_value(state.database, <<"bulk_key_1">>)
       assert val1 == <<"bulk_value_1">>
@@ -192,8 +192,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       vm = state.index_manager
       # Note: Since page 0 doesn't exist, no valid chain is found
       # max_page_id should be 0 (default) and no free pages
-      assert vm.max_page_id == 0
-      assert vm.free_page_ids == []
+      assert vm.page_allocator.max_page_id == 0
+      assert vm.page_allocator.free_page_ids == []
 
       Logic.shutdown(state)
     end
@@ -271,11 +271,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
 
       # Verify structure rebuilt correctly
       vm = state.index_manager
-      assert vm.max_page_id == 7
+      assert vm.page_allocator.max_page_id == 7
 
       # Free pages should be: 1, 4, 5, 6 (gaps in 0,2,3,7)
       expected_free = [1, 4, 5, 6]
-      assert Enum.sort(vm.free_page_ids) == expected_free
+      assert Enum.sort(vm.page_allocator.free_page_ids) == expected_free
 
       Logic.shutdown(state)
     end
@@ -300,8 +300,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PersistenceIntegrationTest do
       vm = state.index_manager
       # Note: Only page 0 is part of the valid chain (others are not linked)
       # max_page_id should be 0 (since page 0 is highest in valid chain) and no free pages
-      assert vm.max_page_id == 0
-      assert vm.free_page_ids == []
+      assert vm.page_allocator.max_page_id == 0
+      assert vm.page_allocator.free_page_ids == []
 
       Logic.shutdown(state)
     end

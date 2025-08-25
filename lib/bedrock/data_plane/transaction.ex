@@ -93,6 +93,8 @@ defmodule Bedrock.DataPlane.Transaction do
 
   import Bitwise, only: [>>>: 2, &&&: 2, <<<: 2, |||: 2]
 
+  alias Bedrock.Cluster.Gateway.TransactionBuilder.Tx
+
   @type transaction_map :: Bedrock.transaction()
 
   @type encoded :: binary()
@@ -356,7 +358,7 @@ defmodule Bedrock.DataPlane.Transaction do
 
   Enables processing large transactions without loading all mutations into memory.
   """
-  @spec stream_mutations(binary()) :: {:ok, Enumerable.t()} | {:error, reason :: term()}
+  @spec stream_mutations(binary()) :: {:ok, Enumerable.t(Tx.mutation())} | {:error, reason :: term()}
   def stream_mutations(encoded_transaction) do
     case extract_section(encoded_transaction, @mutations_tag) do
       {:ok, mutations_payload} ->
@@ -380,7 +382,7 @@ defmodule Bedrock.DataPlane.Transaction do
   Returns a stream of mutations. Use this when you're confident the transaction
   is valid or want to fail fast on invalid data.
   """
-  @spec stream_mutations!(binary()) :: Enumerable.t()
+  @spec stream_mutations!(binary()) :: Enumerable.t(Tx.mutation())
   def stream_mutations!(encoded_transaction) do
     case stream_mutations(encoded_transaction) do
       {:ok, stream} -> stream

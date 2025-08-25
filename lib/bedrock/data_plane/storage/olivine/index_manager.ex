@@ -38,6 +38,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   alias Bedrock.DataPlane.Storage.Olivine.Index
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.IndexUpdate
+  alias Bedrock.DataPlane.Storage.Olivine.PageAllocator
   alias Bedrock.DataPlane.Transaction
   alias Bedrock.DataPlane.Version
 
@@ -55,15 +56,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
             versions: [{Bedrock.version(), version_data()}],
             current_version: Bedrock.version(),
             window_size_in_microseconds: pos_integer(),
-            max_page_id: page_id(),
-            free_page_ids: [page_id()]
+            page_allocator: PageAllocator.t()
           }
   defstruct [
     :versions,
     :current_version,
     :window_size_in_microseconds,
-    :max_page_id,
-    :free_page_ids
+    :page_allocator
   ]
 
   @spec new() :: t()
@@ -72,8 +71,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
       versions: [{Version.zero(), Index.new()}],
       current_version: Version.zero(),
       window_size_in_microseconds: 5_000_000,
-      max_page_id: 0,
-      free_page_ids: []
+      page_allocator: PageAllocator.new(0, [])
     }
   end
 
@@ -90,8 +88,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
           versions: [{durable_version, initial_index}],
           current_version: durable_version,
           window_size_in_microseconds: 5_000_000,
-          max_page_id: max_page_id,
-          free_page_ids: free_page_ids
+          page_allocator: PageAllocator.new(max_page_id, free_page_ids)
         }
 
         {:ok, index_manager}
@@ -156,26 +153,20 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   @spec apply_transaction(t(), binary(), Database.t()) :: t()
   def apply_transaction(%{versions: [{_version, current_index} | _]} = index_manager, transaction, database) do
     commit_version = Transaction.extract_commit_version!(transaction)
-    mutations = transaction |> Transaction.stream_mutations!() |> Enum.to_list()
 
-    page_allocator = IndexUpdate.PageAllocator.new(index_manager.max_page_id, index_manager.free_page_ids)
-
-    index_update =
+    {new_index, updated_page_allocator} =
       current_index
-      |> IndexUpdate.new(commit_version, page_allocator)
-      |> IndexUpdate.apply_mutations(mutations, database)
+      |> IndexUpdate.new(commit_version, index_manager.page_allocator)
+      |> IndexUpdate.apply_mutations(Transaction.stream_mutations!(transaction), database)
       |> IndexUpdate.process_pending_operations()
       |> IndexUpdate.store_modified_pages(database)
-
-    new_index = IndexUpdate.to_index(index_update)
-    updated_allocator = IndexUpdate.to_page_allocator(index_update)
+      |> IndexUpdate.finish()
 
     %{
       index_manager
       | versions: [{commit_version, new_index} | index_manager.versions],
         current_version: commit_version,
-        max_page_id: updated_allocator.max_page_id,
-        free_page_ids: updated_allocator.free_page_ids
+        page_allocator: updated_page_allocator
     }
   end
 
@@ -215,8 +206,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
       # This will maintain metadata about the range of keys managed
       # by this version manager for partition coordination.
       :key_ranges -> []
-      :max_page_id -> index_manager.max_page_id
-      :free_page_ids -> index_manager.free_page_ids
+      :max_page_id -> index_manager.page_allocator.max_page_id
+      :free_page_ids -> index_manager.page_allocator.free_page_ids
       _ -> :undefined
     end
   end
@@ -246,22 +237,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
         {:evict, new_durable_version, evicted_versions, %{index_manager | versions: versions_to_keep}}
     end
   end
-
-  # Persistence is now handled by Database.extract_deduplicated_persistence_data - much simpler and more efficient!
-
-  @spec next_id(index_manager :: t()) :: {page_id(), t()}
-  def next_id(index_manager) do
-    case index_manager.free_page_ids do
-      [page_id | rest] ->
-        {page_id, %{index_manager | free_page_ids: rest}}
-
-      [] ->
-        new_page_id = index_manager.max_page_id + 1
-        {new_page_id, %{index_manager | max_page_id: new_page_id}}
-    end
-  end
-
-  # Version Window Management Functions (Phase 2.1)
 
   @doc """
   Calculates the start of the sliding window based on the current version.
