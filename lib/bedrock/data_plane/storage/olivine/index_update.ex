@@ -44,6 +44,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
       %{allocator | free_page_ids: updated_free_ids}
     end
 
+    @spec recycle_page_ids(t(), [Page.id()]) :: t()
+    def recycle_page_ids(%__MODULE__{} = allocator, page_ids) do
+      Enum.reduce(page_ids, allocator, fn page_id, acc_allocator ->
+        recycle_page_id(acc_allocator, page_id)
+      end)
+    end
+
     # Helper function for maintaining sorted unique list of free page IDs
     @spec add_unique_page_id([Page.id()], Page.id()) :: [Page.id()]
     def add_unique_page_id(id_list, id), do: add_unique_page_id(id_list, id, [])
@@ -175,16 +182,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
   defp apply_clear_mutation(key, _new_version, %__MODULE__{} = update_data) do
     case Tree.page_for_key(update_data.index.tree, key) do
       nil ->
-        # Key doesn't exist, no operation needed
         update_data
 
       page_id ->
-        # Add clear operation to pending operations for this page (last-writer-wins)
-        clear_operation = :clear
-
         updated_operations =
-          Map.update(update_data.pending_operations, page_id, %{key => clear_operation}, fn page_ops ->
-            Map.put(page_ops, key, clear_operation)
+          Map.update(update_data.pending_operations, page_id, %{key => :clear}, fn page_ops ->
+            Map.put(page_ops, key, :clear)
           end)
 
         %{update_data | pending_operations: updated_operations}
@@ -193,72 +196,39 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
 
   @spec apply_range_clear_mutation(binary(), binary(), Bedrock.version(), t()) :: t()
   defp apply_range_clear_mutation(start_key, end_key, _new_version, %__MODULE__{} = update_data) do
-    overlapping_page_ids = Tree.page_ids_in_range(update_data.index.tree, start_key, end_key)
-
-    case overlapping_page_ids do
+    update_data.index.tree
+    |> Tree.page_ids_in_range(start_key, end_key)
+    |> case do
       [] ->
-        # No pages in range, nothing to do
         update_data
 
       [single_page_id] ->
-        # Only one page overlaps, expand range to individual clear operations
         page = Map.fetch!(update_data.index.page_map, single_page_id)
         keys_to_clear = get_keys_in_range(page, start_key, end_key)
 
-        # Add individual clear operations for each key in range
-        updated_operations = add_clear_operations(update_data.pending_operations, single_page_id, keys_to_clear)
+        %{
+          update_data
+          | pending_operations: add_clear_operations(update_data.pending_operations, single_page_id, keys_to_clear)
+        }
 
-        %{update_data | pending_operations: updated_operations}
+      [first_page_id | remaining_page_ids] ->
+        {middle_page_ids, [last_page_id]} = Enum.split(remaining_page_ids, -1)
 
-      multiple_page_ids ->
-        # Multiple pages: first and last get individual clears for keys in range, middle pages get deleted
-        first_page_id = List.first(multiple_page_ids)
-        last_page_id = List.last(multiple_page_ids)
-        middle_page_ids = multiple_page_ids |> Enum.drop(1) |> Enum.drop(-1)
-
-        # Handle first page - get keys from start_key to end of page
         first_page = Map.fetch!(update_data.index.page_map, first_page_id)
-        first_page_end_key = Page.right_key(first_page)
-        first_clear_end = min(end_key, first_page_end_key || end_key)
-        first_keys_to_clear = get_keys_in_range(first_page, start_key, first_clear_end)
+        first_keys_to_clear = get_keys_in_range(first_page, start_key, Page.right_key(first_page))
 
-        # Handle last page - get keys from start of page to end_key
         last_page = Map.fetch!(update_data.index.page_map, last_page_id)
-        last_page_start_key = Page.left_key(last_page)
-        last_clear_start = max(start_key, last_page_start_key || start_key)
-        last_keys_to_clear = get_keys_in_range(last_page, last_clear_start, end_key)
-
-        # Remove middle pages immediately and clean up their pending operations
-        updated_tree =
-          Enum.reduce(middle_page_ids, update_data.index.tree, fn page_id, tree_acc ->
-            page = Map.fetch!(update_data.index.page_map, page_id)
-            Tree.remove_page_from_tree(tree_acc, page)
-          end)
-
-        updated_page_map =
-          Enum.reduce(middle_page_ids, update_data.index.page_map, fn page_id, map_acc ->
-            Map.delete(map_acc, page_id)
-          end)
-
-        # Recycle the deleted middle page IDs
-        updated_allocator =
-          Enum.reduce(middle_page_ids, update_data.page_allocator, fn page_id, allocator ->
-            PageAllocator.recycle_page_id(allocator, page_id)
-          end)
-
-        updated_operations =
-          update_data.pending_operations
-          |> Map.drop(middle_page_ids)
-          |> add_clear_operations(first_page_id, first_keys_to_clear)
-          |> add_clear_operations(last_page_id, last_keys_to_clear)
-
-        updated_index = %{update_data.index | tree: updated_tree, page_map: updated_page_map}
+        last_keys_to_clear = get_keys_in_range(last_page, Page.left_key(last_page), end_key)
 
         %{
           update_data
-          | index: updated_index,
-            page_allocator: updated_allocator,
-            pending_operations: updated_operations
+          | index: Index.delete_pages(update_data.index, middle_page_ids),
+            page_allocator: PageAllocator.recycle_page_ids(update_data.page_allocator, middle_page_ids),
+            pending_operations:
+              update_data.pending_operations
+              |> Map.drop(middle_page_ids)
+              |> add_clear_operations(first_page_id, first_keys_to_clear)
+              |> add_clear_operations(last_page_id, last_keys_to_clear)
         }
     end
   end
@@ -273,6 +243,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexUpdate do
   end
 
   # Helper function to add clear operations for keys on a specific page
+  defp add_clear_operations(operations, _page_id, []), do: operations
+
   defp add_clear_operations(operations, page_id, keys_to_clear) do
     Enum.reduce(keys_to_clear, operations, fn key, ops_acc ->
       Map.update(ops_acc, page_id, %{key => :clear}, &Map.put(&1, key, :clear))

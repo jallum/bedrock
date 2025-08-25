@@ -128,4 +128,28 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
      |> Tree.page_ids_in_range(start_key, end_key)
      |> Enum.map(&Map.fetch!(page_map, &1))}
   end
+
+  @doc """
+  Removes multiple pages from the index by their IDs.
+  Updates both the tree structure and page_map.
+  Returns the updated index.
+  """
+  @spec delete_pages(t(), [Page.id()]) :: t()
+  def delete_pages(index, []), do: index
+
+  def delete_pages(%__MODULE__{tree: tree, page_map: page_map} = index, page_ids) do
+    # Remove pages from tree structure
+    updated_tree =
+      Enum.reduce(page_ids, tree, fn page_id, tree_acc ->
+        case Map.fetch(page_map, page_id) do
+          {:ok, page} -> Tree.remove_page_from_tree(tree_acc, page)
+          :error -> tree_acc
+        end
+      end)
+
+    # Remove pages from page_map
+    updated_page_map = Map.drop(page_map, page_ids)
+
+    %{index | tree: updated_tree, page_map: updated_page_map}
+  end
 end
