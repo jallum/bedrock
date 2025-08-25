@@ -24,7 +24,7 @@ defmodule Bedrock.ControlPlane.Config do
           policies: Policies.t() | nil
         }
 
-  @type state :: :uninitialized | :recovery | :running | :stopping
+  @type state :: :uninitialized | :recovery | :running
 
   @spec key_range(min_key :: Bedrock.key(), max_key_exclusive :: Bedrock.key()) ::
           Bedrock.key_range()

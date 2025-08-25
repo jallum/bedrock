@@ -17,7 +17,7 @@ defmodule Bedrock.DataPlane.Log.Shale.Server do
   import Bedrock.DataPlane.Log.Shale.Pulling, only: [pull: 3]
   import Bedrock.DataPlane.Log.Shale.Pushing, only: [push: 4]
   import Bedrock.DataPlane.Log.Shale.Recovery, only: [recover_from: 4]
-  import Bedrock.DataPlane.Log.Telemetry
+  import Bedrock.DataPlane.Log.Shale.Telemetry
   import Bedrock.Internal.GenServer.Replies
 
   alias Bedrock.Cluster

@@ -1,6 +1,6 @@
 defmodule Bedrock.DataPlane.Log.Shale.Pushing do
   @moduledoc false
-  import Bedrock.DataPlane.Log.Telemetry
+  import Bedrock.DataPlane.Log.Shale.Telemetry
 
   alias Bedrock.DataPlane.Log.Shale.Segment
   alias Bedrock.DataPlane.Log.Shale.State

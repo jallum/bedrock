@@ -1,7 +1,7 @@
 defmodule Bedrock.DataPlane.Log.TelemetryTest do
   use ExUnit.Case, async: true
 
-  alias Bedrock.DataPlane.Log.Telemetry
+  alias Bedrock.DataPlane.Log.Shale.Telemetry
   alias Bedrock.DataPlane.TransactionTestSupport
   alias Bedrock.DataPlane.Version
 

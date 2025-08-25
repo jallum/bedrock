@@ -93,6 +93,8 @@ defmodule Bedrock.DataPlane.Transaction do
 
   import Bitwise, only: [>>>: 2, &&&: 2, <<<: 2, |||: 2]
 
+  alias Bedrock.Cluster.Gateway.TransactionBuilder.Tx
+
   @type transaction_map :: Bedrock.transaction()
 
   @type encoded :: binary()
@@ -356,7 +358,7 @@ defmodule Bedrock.DataPlane.Transaction do
 
   Enables processing large transactions without loading all mutations into memory.
   """
-  @spec stream_mutations(binary()) :: {:ok, Enumerable.t()} | {:error, reason :: term()}
+  @spec stream_mutations(binary()) :: {:ok, Enumerable.t(Tx.mutation())} | {:error, reason :: term()}
   def stream_mutations(encoded_transaction) do
     case extract_section(encoded_transaction, @mutations_tag) do
       {:ok, mutations_payload} ->
@@ -371,6 +373,20 @@ defmodule Bedrock.DataPlane.Transaction do
 
       error ->
         error
+    end
+  end
+
+  @doc """
+  Streams mutations from the transaction, raising if the transaction is invalid.
+
+  Returns a stream of mutations. Use this when you're confident the transaction
+  is valid or want to fail fast on invalid data.
+  """
+  @spec stream_mutations!(binary()) :: Enumerable.t(Tx.mutation())
+  def stream_mutations!(encoded_transaction) do
+    case stream_mutations(encoded_transaction) do
+      {:ok, stream} -> stream
+      {:error, reason} -> raise "Failed to stream mutations: #{inspect(reason)}"
     end
   end
 
@@ -394,6 +410,21 @@ defmodule Bedrock.DataPlane.Transaction do
       {:ok, <<_::unsigned-big-64>> = version} -> {:ok, version}
       {:error, :section_not_found} -> {:ok, nil}
       error -> error
+    end
+  end
+
+  @doc """
+  Extracts the commit version from the COMMIT_VERSION section, raising if not present.
+
+  Raises if the commit version is not present or if there's an error.
+  Use this when you require a commit version to be present.
+  """
+  @spec extract_commit_version!(binary()) :: binary()
+  def extract_commit_version!(encoded_transaction) do
+    case extract_commit_version(encoded_transaction) do
+      {:ok, version} when is_binary(version) -> version
+      {:ok, nil} -> raise "Transaction missing required commit version"
+      {:error, reason} -> raise "Failed to extract commit version: #{inspect(reason)}"
     end
   end
 

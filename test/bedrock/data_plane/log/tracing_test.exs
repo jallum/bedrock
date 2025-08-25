@@ -3,7 +3,7 @@ defmodule Bedrock.DataPlane.Log.TracingTest do
 
   import ExUnit.CaptureLog
 
-  alias Bedrock.DataPlane.Log.Tracing
+  alias Bedrock.DataPlane.Log.Shale.Tracing
   alias Bedrock.DataPlane.TransactionTestSupport
   alias Bedrock.DataPlane.Version
 

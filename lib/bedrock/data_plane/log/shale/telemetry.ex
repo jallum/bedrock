@@ -1,4 +1,4 @@
-defmodule Bedrock.DataPlane.Log.Telemetry do
+defmodule Bedrock.DataPlane.Log.Shale.Telemetry do
   @moduledoc false
   alias Bedrock.DataPlane.Log
   alias Bedrock.DataPlane.Transaction

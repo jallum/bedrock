@@ -58,6 +58,11 @@ defmodule Bedrock.DataPlane.Storage.Basalt.Server do
   end
 
   @impl true
+  def handle_call({:range_fetch, _start_key, _end_key, _version, _opts}, _from, %State{} = t) do
+    reply(t, {:error, :unsupported})
+  end
+
+  @impl true
   def handle_call({:info, fact_names}, _from, %State{} = t), do: t |> Logic.info(fact_names) |> then(&reply(t, &1))
 
   @impl true
