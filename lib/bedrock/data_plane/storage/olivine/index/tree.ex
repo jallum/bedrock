@@ -61,13 +61,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.Tree do
   end
 
   @doc """
-  Finds the best page for inserting a key. With no gaps, this is
-  identical to page_for_key/2.
-  """
-  @spec page_for_insertion(t(), Bedrock.key()) :: page_id()
-  def page_for_insertion(tree, key), do: page_for_key(tree, key)
-
-  @doc """
   Updates the interval tree by adding a new page range.
   """
   @spec add_page_to_tree(t(), page()) :: t()

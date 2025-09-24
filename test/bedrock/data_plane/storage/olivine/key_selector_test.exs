@@ -45,17 +45,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.KeySelectorTest do
         mutations: mutations
       })
 
-    updated_index_manager = IndexManager.apply_transaction(index_manager, transaction, database)
+    {updated_index_manager, updated_database} = IndexManager.apply_transaction(index_manager, transaction, database)
 
     state = %State{
-      database: database,
+      database: updated_database,
       index_manager: updated_index_manager,
       mode: :running,
       waiting_fetches: %{}
     }
 
     on_exit(fn ->
-      Database.close(database)
+      Database.close(updated_database)
       File.rm_rf(db_file)
     end)
 
@@ -200,7 +200,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.KeySelectorTest do
 
       # Simulate version becoming available - notify waiting fetches
       # Waitlist should be processed (though we can't easily verify the results are sent)
-      assert %State{} = Logic.notify_waiting_fetches(state_with_waitlist, version)
+      assert {%State{}, _pids} = Logic.notify_waiting_fetches(state_with_waitlist, version)
     end
   end
 

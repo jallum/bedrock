@@ -4,6 +4,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.RangeClearOrderingPropertyTest do
 
   import Bedrock.Test.Storage.Olivine.InvariantChecks
 
+  alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Index
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
@@ -14,6 +15,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.RangeClearOrderingPropertyTest do
 
   @min_keys 100
   @max_keys 300
+
+  setup do
+    # Create temporary directory for test database
+    temp_dir = System.tmp_dir!() <> "/test_range_clear_#{System.unique_integer()}"
+    File.mkdir_p!(temp_dir)
+
+    db_file_path = Path.join(temp_dir, "range_clear_test.dets")
+    {:ok, database} = Database.open(:"test_db_#{System.unique_integer()}", db_file_path)
+
+    on_exit(fn ->
+      :ok = Database.close(database)
+      File.rm_rf!(temp_dir)
+    end)
+
+    {:ok, database: database}
+  end
 
   describe "range clearing preserves key ordering invariants" do
     property "key ordering is maintained after random range clears and page splits" do
@@ -31,8 +48,20 @@ defmodule Bedrock.DataPlane.Storage.Olivine.RangeClearOrderingPropertyTest do
         # Calculate expected remaining keys BEFORE applying clears
         expected_remaining_keys = calculate_remaining_keys_after_clears(keys, clear_ranges)
 
-        # Apply range clear operations one by one, checking invariants after each
-        final_state = apply_clear_ranges_with_checks(index, allocator, clear_ranges)
+        # Create temporary database for this property test run
+        temp_dir = System.tmp_dir!() <> "/prop_test_#{System.unique_integer()}"
+        File.mkdir_p!(temp_dir)
+        db_file_path = Path.join(temp_dir, "prop_test.dets")
+        {:ok, database} = Database.open(:"prop_db_#{System.unique_integer()}", db_file_path)
+
+        final_state =
+          try do
+            # Apply range clear operations one by one, checking invariants after each
+            apply_clear_ranges_with_checks(index, allocator, clear_ranges, database)
+          after
+            :ok = Database.close(database)
+            File.rm_rf!(temp_dir)
+          end
 
         # Final verification
         final_index = elem(final_state, 0)
@@ -53,19 +82,32 @@ defmodule Bedrock.DataPlane.Storage.Olivine.RangeClearOrderingPropertyTest do
         # Build initial index
         {index, allocator} = build_index_from_keys(keys)
 
-        # Apply mixed operations (only clear_range, no sets to avoid database dependency)
-        version = Version.from_bytes(<<System.system_time(:microsecond)::64>>)
-        index_update = IndexUpdate.new(index, version, allocator)
+        # Create temporary database for this property test run
+        temp_dir = System.tmp_dir!() <> "/prop_test_#{System.unique_integer()}"
+        File.mkdir_p!(temp_dir)
+        db_file_path = Path.join(temp_dir, "prop_test.dets")
+        {:ok, database} = Database.open(:"prop_db_#{System.unique_integer()}", db_file_path)
 
-        # Filter to only clear_range operations
-        clear_operations = Enum.filter(operations, &match?({:clear_range, _, _}, &1))
+        final_index =
+          try do
+            # Apply mixed operations (only clear_range, no sets to avoid database dependency)
+            version = Version.from_bytes(<<System.system_time(:microsecond)::64>>)
+            index_update = IndexUpdate.new(index, version, allocator, database)
 
-        final_index_update =
-          index_update
-          |> apply_clear_mutations_only(clear_operations)
-          |> IndexUpdate.process_pending_operations()
+            # Filter to only clear_range operations
+            clear_operations = Enum.filter(operations, &match?({:clear_range, _, _}, &1))
 
-        {final_index, _} = IndexUpdate.finish(final_index_update)
+            final_index_update =
+              index_update
+              |> apply_clear_mutations_only(clear_operations)
+              |> IndexUpdate.process_pending_operations()
+
+            {final_index, _, _} = IndexUpdate.finish(final_index_update)
+            final_index
+          after
+            :ok = Database.close(database)
+            File.rm_rf!(temp_dir)
+          end
 
         # Verify all invariants
         assert_keys_ordered(final_index, "After mixed operations")
@@ -141,10 +183,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.RangeClearOrderingPropertyTest do
     base_version = Version.zero()
 
     # Create key-version pairs
-    key_versions = Enum.map(keys, &{&1, base_version})
+    key_locators = Enum.map(keys, &{&1, base_version})
 
     # Build pages with controlled size to ensure multiple pages
-    pages = build_pages_from_key_versions(key_versions, 1)
+    pages = build_pages_from_key_locators(key_locators, 1)
 
     # Build index efficiently by constructing page_map and tree directly
     initial_index = Index.new()
@@ -172,31 +214,31 @@ defmodule Bedrock.DataPlane.Storage.Olivine.RangeClearOrderingPropertyTest do
     {index, allocator}
   end
 
-  defp build_pages_from_key_versions(key_versions, start_id) do
+  defp build_pages_from_key_locators(key_locators, start_id) do
     # Split into chunks of max 200 keys per page to ensure multiple pages
-    key_versions
+    key_locators
     |> Enum.chunk_every(200)
     |> Enum.with_index(start_id)
     |> Enum.map(fn {chunk, page_id} ->
-      next_id = if page_id == start_id + div(length(key_versions), 200), do: 0, else: page_id + 1
+      next_id = if page_id == start_id + div(length(key_locators), 200), do: 0, else: page_id + 1
       page = Page.new(page_id, chunk)
       {page, next_id}
     end)
   end
 
-  defp apply_clear_ranges_with_checks(index, allocator, clear_ranges) do
+  defp apply_clear_ranges_with_checks(index, allocator, clear_ranges, database) do
     Enum.reduce(clear_ranges, {index, allocator}, fn {start_key, end_key}, {current_index, current_allocator} ->
       version = Version.from_bytes(<<System.system_time(:microsecond)::64>>)
 
       # Apply single clear range
-      index_update = IndexUpdate.new(current_index, version, current_allocator)
+      index_update = IndexUpdate.new(current_index, version, current_allocator, database)
 
       updated_index_update =
         index_update
         |> apply_clear_mutations_only([{:clear_range, start_key, end_key}])
         |> IndexUpdate.process_pending_operations()
 
-      {new_index, new_allocator} = IndexUpdate.finish(updated_index_update)
+      {new_index, _, new_allocator} = IndexUpdate.finish(updated_index_update)
 
       # Check invariants after this operation
       assert_keys_ordered(
@@ -213,7 +255,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.RangeClearOrderingPropertyTest do
   # Apply only clear mutations without database dependency
   defp apply_clear_mutations_only(index_update, clear_mutations) do
     # Use the real IndexUpdate.apply_mutations implementation
-    IndexUpdate.apply_mutations(index_update, clear_mutations, nil)
+    IndexUpdate.apply_mutations(index_update, clear_mutations)
   end
 
   # Assertion helpers

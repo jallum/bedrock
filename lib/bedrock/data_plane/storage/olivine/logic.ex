@@ -155,8 +155,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   end
 
   defp fetch_from_page(page, key, load_fn) do
-    case Page.version_for_key(page, key) do
-      {:ok, version} -> load_fn.(key, version)
+    case Page.locator_for_key(page, key) do
+      {:ok, locator} -> load_fn.(locator)
       error -> error
     end
   end
@@ -185,11 +185,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
     |> IndexManager.pages_for_range(start_key, end_key, version)
     |> case do
       {:ok, pages} ->
-        load_fn = Database.value_loader(t.database)
+        load_many_fn = Database.many_value_loader(t.database)
         limit = opts[:limit]
 
         do_now_or_async_with_reply(opts[:reply_fn], fn ->
-          range_fetch_from_pages(pages, start_key, end_key, limit, load_fn)
+          range_fetch_from_pages(pages, start_key, end_key, limit, load_many_fn)
         end)
 
       error ->
@@ -213,11 +213,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   def get_range(t, %KeySelector{} = start_selector, %KeySelector{} = end_selector, version, opts) do
     case IndexManager.pages_for_range(t.index_manager, start_selector, end_selector, version) do
       {:ok, {resolved_start_key, resolved_end_key}, pages} ->
-        load_fn = Database.value_loader(t.database)
+        load_many_fn = Database.many_value_loader(t.database)
         limit = opts[:limit]
 
         do_now_or_async_with_reply(opts[:reply_fn], fn ->
-          range_fetch_from_pages(pages, resolved_start_key, resolved_end_key, limit, load_fn)
+          range_fetch_from_pages(pages, resolved_start_key, resolved_end_key, limit, load_many_fn)
         end)
 
       error ->
@@ -225,40 +225,30 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
     end
   end
 
-  defp range_fetch_from_pages(pages, start_key, end_key, limit, load_fn) do
-    stream = Page.stream_key_versions_in_range(pages, start_key, end_key)
+  defp range_fetch_from_pages(pages, start_key, end_key, limit, load_many_fn) do
+    {keys_and_locators, has_more} =
+      pages
+      |> Page.stream_key_locators_in_range(start_key, end_key)
+      |> Stream.with_index()
+      |> Enum.reduce_while({[], false}, fn
+        {key_and_locator, index}, {acc, _} when index < limit ->
+          {:cont, {[key_and_locator | acc], false}}
 
-    {results, has_more} =
-      case limit do
-        nil ->
-          results =
-            Enum.map(stream, fn {key, version} ->
-              {:ok, value} = load_fn.(key, version)
-              {key, value}
-            end)
+        _, {acc, _} ->
+          {:halt, {acc, true}}
+      end)
 
-          {results, false}
+    {:ok, values_by_locator} =
+      keys_and_locators
+      |> Enum.map(fn {_key, locator} -> locator end)
+      |> load_many_fn.()
 
-        limit when is_integer(limit) and limit > 0 ->
-          # Use reduce_while to process only up to limit + early termination detection
-          {results, has_more} =
-            stream
-            |> Stream.with_index()
-            |> Enum.reduce_while({[], false}, &process_indexed_item(&1, &2, limit, load_fn))
-
-          {Enum.reverse(results), has_more}
-      end
+    results =
+      keys_and_locators
+      |> Enum.reverse()
+      |> Enum.map(fn {key, locator} -> {key, Map.get(values_by_locator, locator)} end)
 
     {:ok, {results, has_more}}
-  end
-
-  defp process_indexed_item({{key, version}, index}, {acc, _}, limit, load_fn) do
-    if index < limit do
-      {:ok, value} = load_fn.(key, version)
-      {:cont, {[{key, value} | acc], false}}
-    else
-      {:halt, {acc, true}}
-    end
   end
 
   @doc """
@@ -272,20 +262,20 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
     %{t | waiting_fetches: new_waiting}
   end
 
-  @spec notify_waiting_fetches(State.t(), Bedrock.version()) :: State.t()
+  @spec notify_waiting_fetches(State.t(), Bedrock.version()) :: {State.t(), [pid()]}
   def notify_waiting_fetches(%State{} = t, applied_version) do
     {new_waiting, fetches_to_run} = WaitingList.remove_all(t.waiting_fetches, applied_version)
 
-    updated_state =
-      Enum.reduce(fetches_to_run, %{t | waiting_fetches: new_waiting}, fn
-        {_deadline, reply_fn, fetch_request}, acc_state ->
+    {updated_state, spawned_pids} =
+      Enum.reduce(fetches_to_run, {%{t | waiting_fetches: new_waiting}, []}, fn
+        {_deadline, reply_fn, fetch_request}, {acc_state, pids_acc} ->
           case run_fetch_and_notify(acc_state, reply_fn, fetch_request) do
-            {:ok, pid} -> State.add_active_task(acc_state, pid)
-            :ok -> acc_state
+            {:ok, pid} -> {acc_state, [pid | pids_acc]}
+            :ok -> {acc_state, pids_acc}
           end
       end)
 
-    updated_state
+    {updated_state, spawned_pids}
   end
 
   defp run_fetch_and_notify(t, reply_fn, {key, version}) when is_binary(key) do
@@ -396,9 +386,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   2. Take eviction batch (up to max_eviction_size or window edge) from buffer tracking queue
   3. Advance window to exact eviction point
   """
-  @spec advance_window_with_size_control(State.t()) :: {:ok, State.t()} | {:error, term()}
-  def advance_window_with_size_control(%State{} = state) do
-    case State.get_newest_version_in_buffer(state) do
+  @spec advance_window(State.t()) :: {:ok, State.t()} | {:error, term()}
+  def advance_window(%State{} = state) do
+    case Database.get_newest_version_in_buffer(state.database) do
       nil ->
         # No data in buffer, nothing to evict
         {:ok, state}
@@ -408,8 +398,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
         window_edge_version = calculate_window_edge(newest_version)
 
         # Take eviction batch limited by size and window edge
-        {eviction_batch, state_after_eviction_queue} =
-          State.determine_eviction_batch(state, max_eviction_size(), window_edge_version)
+        {eviction_batch, updated_database} =
+          Database.determine_eviction_batch(state.database, max_eviction_size(), window_edge_version)
+
+        state_after_eviction_queue = %{state | database: updated_database}
 
         case eviction_batch do
           [] ->
@@ -418,7 +410,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
 
           batch ->
             # Get the latest version that should be evicted
-            {eviction_version, _} = List.last(batch)
+            {eviction_version, high_water_mark, _} = List.last(batch)
 
             # Calculate lag: how far behind we are from ideal window edge
             lag_microseconds = calculate_lag_microseconds(window_edge_version, eviction_version)
@@ -433,12 +425,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
             )
 
             # Advance window to exact eviction point
-            advance_window_to_eviction_point(state_after_eviction_queue, eviction_version, state.id)
+            advance_window_to_eviction_point(state_after_eviction_queue, eviction_version, high_water_mark, state.id)
         end
     end
   end
 
-  defp advance_window_to_eviction_point(state, eviction_version, state_id) do
+  defp advance_window_to_eviction_point(state, eviction_version, high_water_mark, state_id) do
     case IndexManager.prepare_window_advancement(state.index_manager, eviction_version) do
       :no_eviction ->
         Telemetry.trace_window_advancement_no_eviction(state.id)
@@ -449,7 +441,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
                Database.advance_durable_version(
                  state.database,
                  new_durable_version,
-                 evicted_versions
+                 evicted_versions,
+                 high_water_mark
                ) do
           final_state = %{state | index_manager: index_manager, database: database}
           Telemetry.trace_window_advancement_complete(state_id, eviction_version)
@@ -489,24 +482,19 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   @doc """
   Apply a batch of transactions to the storage state.
   This is used for incremental processing to avoid large DETS writes.
-  Also adds each transaction to the buffer tracking queue for controlled window advancement.
+  Buffer tracking is now handled directly by IndexManager.apply_transactions.
   """
   @spec apply_transaction_batch(State.t(), [binary()]) :: {:ok, State.t(), Bedrock.version()}
   def apply_transaction_batch(%State{} = t, encoded_transactions) do
-    # Apply just this batch of transactions
-    updated_index_manager = IndexManager.apply_transactions(t.index_manager, encoded_transactions, t.database)
+    # Apply transactions and get updated index manager and database (with buffer tracking)
+    {updated_index_manager, updated_database} =
+      IndexManager.apply_transactions(t.index_manager, encoded_transactions, t.database)
+
     version = updated_index_manager.current_version
 
-    # Add each transaction to buffer tracking queue
-    state_with_buffer_tracking =
-      Enum.reduce(encoded_transactions, t, fn encoded_tx, acc_state ->
-        tx_version = Transaction.commit_version!(encoded_tx)
-        tx_size = byte_size(encoded_tx)
-        State.add_to_buffer_tracking(acc_state, tx_version, tx_size)
-      end)
-
-    state_with_transactions = %{state_with_buffer_tracking | index_manager: updated_index_manager}
-    {:ok, state_with_transactions, version}
+    # Update state with both updated index manager and database
+    updated_state = %{t | index_manager: updated_index_manager, database: updated_database}
+    {:ok, updated_state, version}
   end
 
   #

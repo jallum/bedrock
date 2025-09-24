@@ -148,11 +148,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
     end
   end
 
-  @spec apply_transactions(index_manager :: t(), encoded_transactions :: [binary()], database :: Database.t()) :: t()
-  def apply_transactions(index_manager, [], _database), do: index_manager
+  @spec apply_transactions(index_manager :: t(), encoded_transactions :: [binary()], database :: Database.t()) ::
+          {t(), Database.t()}
+  def apply_transactions(index_manager, [], database), do: {index_manager, database}
 
   def apply_transactions(index_manager, transactions, database) when is_list(transactions) do
-    Enum.reduce(transactions, index_manager, fn transaction, index_manager ->
+    Enum.reduce(transactions, {index_manager, database}, fn transaction, {index_manager, database} ->
       apply_transaction(index_manager, transaction, database)
     end)
   end
@@ -164,24 +165,24 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
   Creates a new version and applies all mutations in the transaction.
   Uses a two-pass approach: first collect all instructions, then process each page.
   """
-  @spec apply_transaction(t(), binary(), Database.t()) :: t()
+  @spec apply_transaction(t(), binary(), Database.t()) :: {t(), Database.t()}
   def apply_transaction(%{versions: [{_version, current_index} | _]} = index_manager, transaction, database) do
     commit_version = Transaction.commit_version!(transaction)
 
-    {new_index, updated_page_allocator} =
+    {new_index, new_database, new_page_allocator} =
       current_index
-      |> IndexUpdate.new(commit_version, index_manager.page_allocator)
-      |> IndexUpdate.apply_mutations(Transaction.mutations!(transaction), database)
+      |> IndexUpdate.new(commit_version, index_manager.page_allocator, database)
+      |> IndexUpdate.apply_mutations(Transaction.mutations!(transaction))
       |> IndexUpdate.process_pending_operations()
-      |> IndexUpdate.store_modified_pages(database)
+      |> IndexUpdate.store_modified_pages()
       |> IndexUpdate.finish()
 
-    %{
-      index_manager
-      | versions: [{commit_version, new_index} | index_manager.versions],
-        current_version: commit_version,
-        page_allocator: updated_page_allocator
-    }
+    {%{
+       index_manager
+       | versions: [{commit_version, new_index} | index_manager.versions],
+         current_version: commit_version,
+         page_allocator: new_page_allocator
+     }, new_database}
   end
 
   # Helper Functions
@@ -243,7 +244,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManager do
 
       {versions_to_keep, versions_to_evict} ->
         new_durable_version = elem(List.first(versions_to_evict), 0)
-        evicted_versions = Enum.map(versions_to_evict, fn {version, _} -> version end)
+        evicted_versions = Enum.map(versions_to_evict, fn {version, _data} -> version end)
 
         {:evict, new_durable_version, evicted_versions, %{index_manager | versions: versions_to_keep}}
     end

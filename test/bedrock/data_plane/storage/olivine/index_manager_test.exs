@@ -37,7 +37,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
         {key, Version.from_integer(version_int)}
       end)
 
-    assert Page.key_versions(page) == expected_tuples
+    assert Page.key_locators(page) == expected_tuples
   end
 
   # Helper function to create test transactions
@@ -80,7 +80,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
 
       assert Page.id(page) == 1
       # next_id defaults to 0 when not specified
-      assert Page.key_versions(page) == expected_key_versions
+      assert Page.key_locators(page) == expected_key_versions
     end
 
     test "new/3 creates a page with keys and default versions" do
@@ -92,7 +92,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       assert Page.id(page) == 1
       # next_id defaults to 0 when not specified
       assert Page.keys(page) == keys
-      assert Page.key_versions(page) == expected_key_versions
+      assert Page.key_locators(page) == expected_key_versions
     end
 
     test "key_count/1 returns correct key count" do
@@ -122,7 +122,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
 
       assert Page.id(decoded_page) == 42
       assert decoded_page.next_id == 0
-      assert Page.key_versions(decoded_page) == expected_key_versions
+      assert Page.key_locators(decoded_page) == expected_key_versions
     end
 
     test "from_map/1 creates proper binary format" do
@@ -167,29 +167,29 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
   end
 
   describe "key operations within pages" do
-    test "version_for_key/2 finds existing keys" do
+    test "locator_for_key/2 finds existing keys" do
       keys = [<<"apple">>, <<"banana">>, <<"cherry">>]
       versions = [100, 200, 300]
       page = Page.new(1, Enum.zip(keys, Enum.map(versions, &Version.from_integer/1)))
 
-      assert {:ok, version_apple} = Page.version_for_key(page, <<"apple">>)
-      assert {:ok, version_banana} = Page.version_for_key(page, <<"banana">>)
-      assert {:ok, version_cherry} = Page.version_for_key(page, <<"cherry">>)
+      assert {:ok, version_apple} = Page.locator_for_key(page, <<"apple">>)
+      assert {:ok, version_banana} = Page.locator_for_key(page, <<"banana">>)
+      assert {:ok, version_cherry} = Page.locator_for_key(page, <<"cherry">>)
 
       assert version_apple == Version.from_integer(100)
       assert version_banana == Version.from_integer(200)
       assert version_cherry == Version.from_integer(300)
     end
 
-    test "version_for_key/2 returns error for missing keys" do
+    test "locator_for_key/2 returns error for missing keys" do
       page =
         Page.new(1, [
           {<<"apple">>, Version.from_integer(100)},
           {<<"banana">>, Version.from_integer(200)}
         ])
 
-      assert {:error, :not_found} = Page.version_for_key(page, <<"missing">>)
-      assert {:error, :not_found} = Page.version_for_key(page, <<"zebra">>)
+      assert {:error, :not_found} = Page.locator_for_key(page, <<"missing">>)
+      assert {:error, :not_found} = Page.locator_for_key(page, <<"zebra">>)
     end
 
     test "apply_operations/2 inserts new keys in sorted order" do
@@ -310,8 +310,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       {{left_page, _left_next_id}, {right_page, _right_next_id}} = Page.split_page(page, mid_point, new_page_id, 0)
 
       # Verify all key-version pairs are preserved
-      left_key_versions = Page.key_versions(left_page)
-      right_key_versions = Page.key_versions(right_page)
+      left_key_versions = Page.key_locators(left_page)
+      right_key_versions = Page.key_locators(right_page)
       combined_key_versions = left_key_versions ++ right_key_versions
 
       assert length(combined_key_versions) == 300
@@ -338,7 +338,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       ]
 
       transaction = test_transaction(mutations, Version.from_integer(1000))
-      vm_updated = IndexManager.apply_transactions(vm, [transaction], db)
+      {vm_updated, _updated_db} = IndexManager.apply_transactions(vm, [transaction], db)
 
       # Should be able to fetch page containing key
       assert {:ok, page} = IndexManager.page_for_key(vm_updated, <<"banana">>, Version.from_integer(1000))
@@ -358,7 +358,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       # Add data at version 1000
       mutation = {:set, <<"key1">>, <<"value1">>}
       transaction = test_transaction([mutation], Version.from_integer(1000))
-      vm_updated = IndexManager.apply_transactions(vm, [transaction], db)
+      {vm_updated, _updated_db} = IndexManager.apply_transactions(vm, [transaction], db)
 
       # Should work at current version
       assert {:ok, _page} = IndexManager.page_for_key(vm_updated, <<"key1">>, Version.from_integer(1000))
@@ -385,7 +385,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
         end
 
       transaction = test_transaction(mutations, Version.from_integer(1000))
-      vm_updated = IndexManager.apply_transactions(vm, [transaction], db)
+      {vm_updated, _updated_db} = IndexManager.apply_transactions(vm, [transaction], db)
 
       # Fetch pages for a range
       start_key = <<"key_010">>
@@ -420,8 +420,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
 
       transaction = test_transaction(mutations, Version.from_integer(1000))
 
-      assert %{current_version: current_version} =
-               IndexManager.apply_transaction(vm, transaction, database)
+      {%{current_version: current_version} = _updated_vm, _updated_database} =
+        IndexManager.apply_transaction(vm, transaction, database)
 
       assert current_version == Version.from_integer(1000)
 
@@ -440,7 +440,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       ]
 
       set_transaction = test_transaction(set_mutations, Version.from_integer(1000))
-      vm_with_data = IndexManager.apply_transaction(vm, set_transaction, database)
+      {vm_with_data, database} = IndexManager.apply_transaction(vm, set_transaction, database)
 
       # Then clear one key
       clear_mutations = [
@@ -448,7 +448,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       ]
 
       clear_transaction = test_transaction(clear_mutations, Version.from_integer(1100))
-      vm_after_clear = IndexManager.apply_transaction(vm_with_data, clear_transaction, database)
+      {vm_after_clear, _database} = IndexManager.apply_transaction(vm_with_data, clear_transaction, database)
 
       # Key1 and Key3 should still be fetchable at version 1000
       assert {:ok, _page} = IndexManager.page_for_key(vm_after_clear, <<"key1">>, Version.from_integer(1000))
@@ -457,7 +457,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       # Key2 should not be fetchable at version 1100 (after clear)
       # We expect the page to exist but key2 should not be found in it
       assert {:ok, page} = IndexManager.page_for_key(vm_after_clear, <<"key2">>, Version.from_integer(1100))
-      assert {:error, :not_found} = Page.version_for_key(page, <<"key2">>)
+      assert {:error, :not_found} = Page.locator_for_key(page, <<"key2">>)
 
       Database.close(database)
     end
@@ -475,7 +475,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
         end
 
       set_transaction = test_transaction(set_mutations, Version.from_integer(1000))
-      vm_with_data = IndexManager.apply_transaction(vm, set_transaction, database)
+      {vm_with_data, database} = IndexManager.apply_transaction(vm, set_transaction, database)
 
       # Clear a range
       clear_mutations = [
@@ -483,7 +483,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       ]
 
       clear_transaction = test_transaction(clear_mutations, Version.from_integer(1100))
-      vm_after_clear = IndexManager.apply_transaction(vm_with_data, clear_transaction, database)
+      {vm_after_clear, _database} = IndexManager.apply_transaction(vm_with_data, clear_transaction, database)
 
       # Keys outside the range should still be accessible
       assert {:ok, _page} = IndexManager.page_for_key(vm_after_clear, <<"key_01">>, Version.from_integer(1100))
@@ -492,13 +492,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       # Keys within the cleared range should not be accessible at the new version
       # Test a few specific keys deterministically
       assert {:ok, page} = IndexManager.page_for_key(vm_after_clear, <<"key_05">>, Version.from_integer(1100))
-      assert {:error, :not_found} = Page.version_for_key(page, <<"key_05">>)
+      assert {:error, :not_found} = Page.locator_for_key(page, <<"key_05">>)
 
       assert {:ok, page} = IndexManager.page_for_key(vm_after_clear, <<"key_10">>, Version.from_integer(1100))
-      assert {:error, :not_found} = Page.version_for_key(page, <<"key_10">>)
+      assert {:error, :not_found} = Page.locator_for_key(page, <<"key_10">>)
 
       assert {:ok, page} = IndexManager.page_for_key(vm_after_clear, <<"key_15">>, Version.from_integer(1100))
-      assert {:error, :not_found} = Page.version_for_key(page, <<"key_15">>)
+      assert {:error, :not_found} = Page.locator_for_key(page, <<"key_15">>)
 
       Database.close(database)
     end
@@ -513,8 +513,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
         test_transaction([{:set, <<"key3">>, <<"value3">>}], Version.from_integer(1200))
       ]
 
-      assert %{current_version: current_version} =
-               IndexManager.apply_transactions(vm, transactions, db)
+      {updated_vm, _updated_db} = IndexManager.apply_transactions(vm, transactions, db)
+      assert %{current_version: current_version} = updated_vm
 
       assert current_version == Version.from_integer(1200)
 
@@ -591,7 +591,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       ]
 
       transaction = test_transaction(mutations, Version.from_integer(1000))
-      vm_updated = IndexManager.apply_transactions(vm, [transaction], database)
+      {vm_updated, _updated_db} = IndexManager.apply_transactions(vm, [transaction], database)
 
       # Tree should be able to find pages for keys
       # This is tested indirectly through page_for_key working
@@ -627,7 +627,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
   end
 
   describe "streaming operations" do
-    test "stream_key_versions_in_range/3 filters keys correctly" do
+    test "stream_key_locators_in_range/3 filters keys correctly" do
       # Create pages with key-version pairs
       page1 =
         Page.new(1, [
@@ -647,7 +647,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       # Stream keys in range "banana" to "date" (exclusive end)
       key_versions =
         pages
-        |> Page.stream_key_versions_in_range(<<"banana">>, <<"date">>)
+        |> Page.stream_key_locators_in_range(<<"banana">>, <<"date">>)
         |> Enum.to_list()
 
       expected = [
@@ -658,7 +658,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       assert key_versions == expected
     end
 
-    test "stream_key_versions_in_range/3 returns consistent results" do
+    test "stream_key_locators_in_range/3 returns consistent results" do
       # Create pages with key-version pairs
       page =
         Page.new(1, [
@@ -671,12 +671,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
 
       key_versions_1 =
         pages
-        |> Page.stream_key_versions_in_range(<<"banana">>, <<"zebra">>)
+        |> Page.stream_key_locators_in_range(<<"banana">>, <<"zebra">>)
         |> Enum.to_list()
 
       key_versions_2 =
         pages
-        |> Page.stream_key_versions_in_range(<<"banana">>, <<"zebra">>)
+        |> Page.stream_key_locators_in_range(<<"banana">>, <<"zebra">>)
         |> Enum.to_list()
 
       assert key_versions_1 == key_versions_2
@@ -827,7 +827,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerTest do
       ]
 
       transaction = test_transaction(mutations, Version.from_integer(1))
-      updated_manager = IndexManager.apply_transaction(manager, transaction, database)
+      {updated_manager, database} = IndexManager.apply_transaction(manager, transaction, database)
 
       on_exit(fn -> Database.close(database) end)
 

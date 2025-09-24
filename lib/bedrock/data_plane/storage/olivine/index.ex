@@ -100,6 +100,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
     }
   end
 
+  @spec locator_for_key(t(), Bedrock.key()) ::
+          {:ok, Page.t(), Database.locator()} | {:error, :not_found}
+  def locator_for_key(index, key) do
+    with {:ok, page} <- page_for_key(index, key),
+         {:ok, locator} <- Page.locator_for_key(page, key) do
+      {:ok, page, locator}
+    end
+  end
+
   @doc """
   Loads an Index from the database by traversing the page chain and building the tree structure.
   Returns {:ok, index, max_page_id, free_page_ids} or an error.
@@ -280,9 +289,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   """
   @spec multi_split_page(t(), Page.id(), Page.id(), Page.t(), [Page.id()]) :: t()
   def multi_split_page(index, original_page_id, original_next_id, updated_page, new_page_ids) do
-    all_key_versions = Page.key_versions(updated_page)
+    all_key_locators = Page.key_locators(updated_page)
 
-    key_chunks = Enum.chunk_every(all_key_versions, @max_keys_per_page)
+    key_chunks = Enum.chunk_every(all_key_locators, @max_keys_per_page)
 
     all_page_ids = [original_page_id | new_page_ids]
 

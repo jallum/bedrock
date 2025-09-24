@@ -8,6 +8,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   alias Bedrock.DataPlane.Storage.Olivine.Logic
   alias Bedrock.DataPlane.Storage.Olivine.State
   alias Bedrock.DataPlane.Storage.Telemetry
+  alias Bedrock.DataPlane.Transaction
   alias Bedrock.Service.Foreman
 
   # Process transactions up to this size (in bytes) per window advancement
@@ -48,7 +49,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
         Telemetry.trace_read_task_spawned(t.otp_name, :get, key)
 
         t
-        |> State.add_active_task(task_pid)
+        |> add_active_task(task_pid)
         |> noreply_with_transaction_processing()
 
       {:error, :version_too_new} ->
@@ -81,7 +82,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
         Telemetry.trace_read_task_spawned(t.otp_name, :get_range, {start_key, end_key})
 
         t
-        |> State.add_active_task(task_pid)
+        |> add_active_task(task_pid)
         |> noreply_with_transaction_processing()
 
       {:error, :version_too_new} ->
@@ -148,14 +149,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
     noreply_with_transaction_processing(t)
   end
 
-  defp maybe_advance_window_and_notify(state, version) do
-    {:ok, final_state} = Logic.advance_window_with_size_control(state)
-    Logic.notify_waiting_fetches(final_state, version)
+  defp notify_waiting_fetches(state, version) do
+    {updated_state, spawned_pids} = Logic.notify_waiting_fetches(state, version)
+    Enum.reduce(spawned_pids, updated_state, &add_active_task(&2, &1))
   end
 
   # Helper to resume transaction processing if queue has work
   defp noreply_with_transaction_processing(state) do
-    if State.queue_empty?(state) do
+    if queue_empty?(state) do
       noreply(state)
     else
       Telemetry.trace_transaction_timeout_scheduled(state.otp_name)
@@ -172,8 +173,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   @impl true
   def handle_info({:apply_transactions, encoded_transactions}, %State{} = t) do
     # Queue the transactions and start processing
-    updated_state = State.queue_transactions(t, encoded_transactions)
-    queue_size = State.queue_size(updated_state)
+    updated_state = queue_transactions(t, encoded_transactions)
+    queue_size = queue_size(updated_state)
     Telemetry.trace_transactions_queued(t.otp_name, length(encoded_transactions), queue_size)
     Telemetry.trace_transaction_timeout_scheduled(t.otp_name)
     noreply(updated_state, timeout: 0)
@@ -181,7 +182,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
 
   @impl true
   def handle_info(:timeout, %State{} = t) do
-    case State.take_transaction_batch_by_size(t, @max_batch_size_bytes) do
+    case take_transaction_batch_by_size(t, @max_batch_size_bytes) do
       {[], nil, updated_state} ->
         # No more transactions to process
         noreply(updated_state)
@@ -196,7 +197,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
         {:ok, state_with_txns, version} = Logic.apply_transaction_batch(updated_state, batch)
 
         # Use new size-controlled window advancement
-        final_state = maybe_advance_window_and_notify(state_with_txns, version)
+        {:ok, state_after_window} = Logic.advance_window(state_with_txns)
+        final_state = notify_waiting_fetches(state_after_window, version)
 
         duration = System.monotonic_time(:microsecond) - start_time
         Telemetry.trace_batch_processing_complete(t.otp_name, batch_size, duration, batch_size_bytes)
@@ -207,7 +209,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   @impl true
   def handle_info({:transactions_applied, version}, %State{} = t) do
     t
-    |> Logic.notify_waiting_fetches(version)
+    |> notify_waiting_fetches(version)
     |> noreply_with_transaction_processing()
   end
 
@@ -216,7 +218,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
     Telemetry.trace_read_task_complete(t.otp_name, pid)
 
     t
-    |> State.remove_active_task(pid)
+    |> remove_active_task(pid)
     |> noreply_with_transaction_processing()
   end
 
@@ -228,7 +230,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   @impl true
   def terminate(reason, %State{} = t) do
     Telemetry.trace_shutdown_start(t.otp_name, reason)
-    active_tasks = State.get_active_tasks(t)
+    active_tasks = get_active_tasks(t)
 
     if MapSet.size(active_tasks) > 0 do
       wait_for_tasks(active_tasks, 5_000, t.otp_name)
@@ -273,4 +275,60 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Server do
   end
 
   defp reply_fn_for(from), do: fn result -> GenServer.reply(from, result) end
+
+  # Transaction queue management functions
+
+  @spec queue_transactions(State.t(), [binary()]) :: State.t()
+  defp queue_transactions(t, encoded_transactions) do
+    new_queue =
+      Enum.reduce(encoded_transactions, t.transaction_queue, fn encoded_tx, queue ->
+        version = Transaction.commit_version!(encoded_tx)
+        size = byte_size(encoded_tx)
+        :queue.in({encoded_tx, version, size}, queue)
+      end)
+
+    %{t | transaction_queue: new_queue}
+  end
+
+  @spec take_transaction_batch_by_size(State.t(), pos_integer()) :: {[binary()], Bedrock.version() | nil, State.t()}
+  defp take_transaction_batch_by_size(t, max_size_bytes) do
+    {batch, last_version, new_queue} = take_batch_by_size(t.transaction_queue, max_size_bytes, [], 0, nil)
+    {batch, last_version, %{t | transaction_queue: new_queue}}
+  end
+
+  # Always take at least one transaction, even if it exceeds the size limit
+  defp take_batch_by_size(queue, max_size, [_ | _] = acc, current_size, last_version) when current_size >= max_size do
+    {Enum.reverse(acc), last_version, queue}
+  end
+
+  defp take_batch_by_size(queue, max_size, acc, current_size, last_version) do
+    case :queue.out(queue) do
+      {{:value, {transaction, version, size}}, new_queue} ->
+        new_size = current_size + size
+        take_batch_by_size(new_queue, max_size, [transaction | acc], new_size, version)
+
+      {:empty, queue} ->
+        {Enum.reverse(acc), last_version, queue}
+    end
+  end
+
+  @spec queue_empty?(State.t()) :: boolean()
+  defp queue_empty?(t), do: :queue.is_empty(t.transaction_queue)
+
+  @spec queue_size(State.t()) :: non_neg_integer()
+  defp queue_size(t), do: :queue.len(t.transaction_queue)
+
+  # Active task management functions
+
+  @spec add_active_task(State.t(), pid()) :: State.t()
+  defp add_active_task(t, task_pid) do
+    Process.monitor(task_pid)
+    %{t | active_tasks: MapSet.put(t.active_tasks, task_pid)}
+  end
+
+  @spec remove_active_task(State.t(), pid()) :: State.t()
+  defp remove_active_task(t, task_pid), do: %{t | active_tasks: MapSet.delete(t.active_tasks, task_pid)}
+
+  @spec get_active_tasks(State.t()) :: MapSet.t(pid())
+  defp get_active_tasks(t), do: t.active_tasks
 end

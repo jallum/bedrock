@@ -4,7 +4,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.TreeTest do
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
 
-  describe "page_for_insertion/2" do
+  describe "page_for_key/2" do
     test "returns correct page for key insertion" do
       page1_kvs = [{"a", <<1::64>>}, {"f", <<2::64>>}]
       page2_kvs = [{"g", <<3::64>>}, {"m", <<4::64>>}]
@@ -18,13 +18,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index.TreeTest do
         |> Tree.add_page_to_tree(page2)
 
       # Key "c" should go to page 1 (contains "a" to "f")
-      assert Tree.page_for_insertion(tree, "c") == 1
+      assert Tree.page_for_key(tree, "c") == 1
 
       # Key "j" should go to page 2 (contains "g" to "m")
-      assert Tree.page_for_insertion(tree, "j") == 2
+      assert Tree.page_for_key(tree, "j") == 2
 
       # Key "z" (beyond all pages) should go to rightmost page (always 0)
-      assert Tree.page_for_insertion(tree, "z") == 0
+      assert Tree.page_for_key(tree, "z") == 0
     end
   end
 

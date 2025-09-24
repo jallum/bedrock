@@ -3,6 +3,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
 
   import Bedrock.Test.Storage.Olivine.InvariantChecks
 
+  alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Index
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
@@ -10,8 +11,24 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
   alias Bedrock.DataPlane.Storage.Olivine.PageAllocator
   alias Bedrock.Test.Storage.Olivine.IndexTestHelpers
 
+  setup do
+    # Create temporary directory for test database
+    temp_dir = System.tmp_dir!() <> "/test_page_split_#{System.unique_integer()}"
+    File.mkdir_p!(temp_dir)
+
+    db_file_path = Path.join(temp_dir, "page_split_test.dets")
+    {:ok, database} = Database.open(:"test_db_#{System.unique_integer()}", db_file_path)
+
+    on_exit(fn ->
+      :ok = Database.close(database)
+      File.rm_rf!(temp_dir)
+    end)
+
+    {:ok, database: database}
+  end
+
   describe "page splitting maintains tree ordering" do
-    test "page splitting maintains key ordering after distributed mutations" do
+    test "page splitting maintains key ordering after distributed mutations", %{database: database} do
       base_version = <<0, 0, 0, 0, 0, 0, 0, 0>>
 
       # Create a proper gap-free setup with page 0 as leftmost
@@ -40,14 +57,14 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
       even_keys = for i <- 1..300, i = i * 2, do: i
       shuffled_even_keys = Enum.shuffle(even_keys)
 
-      # Distribute even keys to their correct pages based on Tree.page_for_insertion
+      # Distribute even keys to their correct pages based on Tree.page_for_key
       version = <<0, 0, 0, 0, 0, 0, 0, 1>>
 
       # Group operations by target page
       operations_by_page =
         Enum.reduce(shuffled_even_keys, %{}, fn key, acc ->
           key_binary = <<key::16>>
-          target_page_id = Tree.page_for_insertion(index.tree, key_binary)
+          target_page_id = Tree.page_for_key(index.tree, key_binary)
           operation = {key_binary, {:set, version}}
 
           Map.update(acc, target_page_id, [operation], &[operation | &1])
@@ -62,7 +79,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
 
       # Apply distributed operations
       allocator = PageAllocator.new(3, [])
-      index_update = IndexUpdate.new(index, version, allocator)
+      index_update = IndexUpdate.new(index, version, allocator, database)
 
       index_update_with_ops = %{
         index_update
@@ -71,7 +88,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
 
       # Process all operations - this should trigger splits where needed
       final_index_update = IndexUpdate.process_pending_operations(index_update_with_ops)
-      {final_index, _} = IndexUpdate.finish(final_index_update)
+      {final_index, _, _} = IndexUpdate.finish(final_index_update)
 
       # Verify all keys are still in perfect order
       all_keys_after = extract_all_keys_in_order(final_index)
@@ -99,7 +116,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
       assert all_keys_after == expected_sorted, "Should have all expected keys in order"
     end
 
-    test "tree consistency is maintained after page operations" do
+    test "tree consistency is maintained after page operations", %{database: database} do
       base_version = <<0, 0, 0, 0, 0, 0, 0, 0>>
 
       # Create pages with predictable key ranges in proper order
@@ -119,15 +136,15 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
       # Apply a range clear that will trigger page splitting on the middle page
       version = <<0, 0, 0, 0, 0, 0, 0, 1>>
       allocator = PageAllocator.new(3, [])
-      index_update = IndexUpdate.new(index, version, allocator)
+      index_update = IndexUpdate.new(index, version, allocator, database)
 
       # Add enough operations to trigger splitting
       extra_ops = for i <- 300..400, do: {<<0x62, i::16>>, {:set, version}}
 
-      # Group operations by target page using Tree.page_for_insertion
+      # Group operations by target page using Tree.page_for_key
       operations_by_page =
         Enum.reduce(extra_ops, %{}, fn {key, operation}, acc ->
-          target_page_id = Tree.page_for_insertion(index.tree, key)
+          target_page_id = Tree.page_for_key(index.tree, key)
           Map.update(acc, target_page_id, %{key => operation}, &Map.put(&1, key, operation))
         end)
 
@@ -137,7 +154,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
       }
 
       final_index_update = IndexUpdate.process_pending_operations(index_update_with_ops)
-      {final_index, _} = IndexUpdate.finish(final_index_update)
+      {final_index, _, _} = IndexUpdate.finish(final_index_update)
 
       # Verify we have all expected keys (original + added)
       initial_keys =
@@ -160,7 +177,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
       assert_all_invariants(final_index)
     end
 
-    test "large scale key preservation with 1710+ keys" do
+    test "large scale key preservation with 1710+ keys", %{database: database} do
       base_version = <<0, 0, 0, 0, 0, 0, 0, 0>>
 
       # Create 1710 keys similar to your demo
@@ -172,7 +189,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
 
       # Convert to binary keys and create initial pages
       binary_keys = Enum.map(class_names, &:erlang.term_to_binary/1)
-      _key_versions = Enum.map(binary_keys, &{&1, base_version})
+      _key_locators = Enum.map(binary_keys, &{&1, base_version})
 
       # Build index by adding keys in batches (simulating your insertion pattern)
       index = Index.new()
@@ -180,13 +197,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.PageSplitTreeOrderingTest do
       allocator = PageAllocator.new(0, [])
 
       # Process all keys through IndexUpdate to trigger realistic page splits
-      index_update = IndexUpdate.new(index, version, allocator)
+      index_update = IndexUpdate.new(index, version, allocator, database)
 
       operations = Map.new(binary_keys, &{&1, {:set, version}})
       index_update_with_ops = %{index_update | pending_operations: %{0 => operations}}
 
       final_index_update = IndexUpdate.process_pending_operations(index_update_with_ops)
-      {final_index, _} = IndexUpdate.finish(final_index_update)
+      {final_index, _, _} = IndexUpdate.finish(final_index_update)
 
       # Verify we have ALL keys - this is the critical test
       actual_keys = extract_all_keys_in_order(final_index)

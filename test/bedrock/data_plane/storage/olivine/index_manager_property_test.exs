@@ -14,7 +14,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerPropertyTest do
 
   **Page Location Functions:**
   - `Tree.page_for_key` correctly identifies pages for keys in their ranges
-  - `Tree.page_for_insertion` never returns nil for non-empty trees
+  - `Tree.page_for_key` never returns nil for non-empty trees
   - `find_rightmost_page` correctly identifies the page with highest last_key
 
   **Key Insertion Properties:**
@@ -215,7 +215,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerPropertyTest do
     end
   end
 
-  property "page_for_insertion never returns nil for non-empty tree" do
+  property "page_for_key never returns nil for non-empty tree" do
     check all(
             pages <- non_overlapping_pages_generator(),
             test_key <- binary_key_generator()
@@ -223,11 +223,11 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerPropertyTest do
       if length(pages) > 0 do
         tree = build_tree_from_pages(pages)
 
-        found_page_id = Tree.page_for_insertion(tree, test_key)
+        found_page_id = Tree.page_for_key(tree, test_key)
         page_ids = Enum.map(pages, &Page.id/1)
 
         assert is_integer(found_page_id) and found_page_id >= 0 and (found_page_id in page_ids or found_page_id == 0),
-               "page_for_insertion should return a valid page_id that exists in tree or 0 (rightmost page)"
+               "page_for_key should return a valid page_id that exists in tree or 0 (rightmost page)"
       end
     end
   end
@@ -261,7 +261,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerPropertyTest do
 
         # Validate page invariants after operation
         assert PageTestHelpers.keys_are_sorted(updated_page) and
-                 Page.key_count(updated_page) == length(Page.key_versions(updated_page)) and
+                 Page.key_count(updated_page) == length(Page.key_locators(updated_page)) and
                  Page.has_key?(updated_page, new_key),
                "Page should maintain sorted order, key/version count consistency, and contain new key"
 
@@ -352,7 +352,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerPropertyTest do
 
       assert Tree.page_for_key(empty_tree, test_key) == 0
 
-      assert Tree.page_for_insertion(empty_tree, test_key) == 0
+      assert Tree.page_for_key(empty_tree, test_key) == 0
 
       assert find_rightmost_page(empty_tree) == nil
     end
@@ -368,7 +368,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.IndexManagerPropertyTest do
 
         assert find_rightmost_page(tree) == Page.id(page)
 
-        found_page_id = Tree.page_for_insertion(tree, test_key)
+        found_page_id = Tree.page_for_key(tree, test_key)
         # Key can map to the page itself or to page 0 (rightmost) if beyond page's range
         assert found_page_id == Page.id(page) or found_page_id == 0
       end
