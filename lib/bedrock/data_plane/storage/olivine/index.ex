@@ -5,9 +5,10 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   ## Structure
 
   The index consists of:
-  - **Tree**: gb_trees keyed by page `last_key`, storing `{page_id, first_key}`
+  - **Tree**: gb_trees keyed by page `last_key`, storing `page_id`
   - **Page Map**: Map of page_id → Page structs containing key-value pairs
   - **Page Chain**: Linked list of pages via `next_id` pointers, starting from page 0
+  - **Gap-Free Design**: Pages cover entire keyspace with no gaps between them
 
   ## Critical Invariants
 
@@ -37,10 +38,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   2. Search within page for exact key match
 
   ### Mutation Application
-  1. Use `Tree.page_for_insertion(key)` to find target page
-  2. For gaps between pages, place key in page whose `first_key` is smallest > key
-  3. If no such page exists, use rightmost page
-  4. Apply operations to page, maintaining sorted order within page
+  1. Use `Tree.page_for_key(key)` to find target page (no gaps exist)
+  2. Apply operations to page, maintaining sorted order within page
 
   ### Page Splitting
   1. When page exceeds 256 keys, split at midpoint (or into multiple pages)
@@ -59,100 +58,192 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
+  alias Bedrock.DataPlane.Storage.Olivine.IndexDatabase
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
+
+  # Page sizing constant
+  @max_keys_per_page 256
+
+  @doc "Returns the maximum number of keys allowed per page before splitting"
+  def max_keys_per_page, do: @max_keys_per_page
 
   @type operation :: IndexManager.operation()
 
   @type t :: %__MODULE__{
           tree: :gb_trees.tree(),
-          page_map: map()
+          page_map: map(),
+          min_key: Bedrock.key(),
+          max_key: Bedrock.key()
         }
 
   defstruct [
     :tree,
-    :page_map
+    :page_map,
+    :min_key,
+    :max_key
   ]
 
   @doc """
-  Creates a new empty Index with an initial page.
+  Creates a new empty Index with an initial page covering the entire keyspace.
   """
   @spec new() :: t()
   def new do
     initial_page = Page.new(0, [])
-    initial_tree = :gb_trees.empty()
+    # Add page 0 to tree with empty key (covers beginning of keyspace)
+    initial_tree = Tree.add_page_to_tree(:gb_trees.empty(), initial_page)
     initial_page_map = %{0 => {initial_page, 0}}
 
     %__MODULE__{
       tree: initial_tree,
-      page_map: initial_page_map
+      page_map: initial_page_map,
+      min_key: <<0xFF, 0xFF>>,
+      max_key: <<>>
     }
+  end
+
+  @spec locator_for_key(t(), Bedrock.key()) ::
+          {:ok, Page.t(), Database.locator()} | {:error, :not_found}
+  def locator_for_key(index, key) do
+    page = page_for_key(index, key)
+
+    case Page.locator_for_key(page, key) do
+      {:ok, locator} -> {:ok, page, locator}
+      {:error, :not_found} -> {:error, :not_found}
+    end
   end
 
   @doc """
   Loads an Index from the database by traversing the page chain and building the tree structure.
-  Returns {:ok, index, max_page_id, free_page_ids} or an error.
+  Returns {:ok, index, max_id, free_ids, total_key_count} or an error.
   """
   @spec load_from(Database.t()) ::
-          {:ok, t(), Page.id(), [Page.id()]} | {:error, :corrupted_page | :broken_chain | :cycle_detected | :no_chain}
-  def load_from(database) do
-    case load_page_chain(database, 0, %{}) do
-      {:ok, page_map} ->
-        tree = Tree.from_page_map(page_map)
-        page_ids = page_map |> Map.keys() |> MapSet.new()
-        max_page_id = max(0, Enum.max(page_ids))
-        free_page_ids = calculate_free_page_ids(max_page_id, page_ids)
+          {:ok, t(), Page.id(), [Page.id()], non_neg_integer()}
+          | {:error, :missing_pages}
+  def load_from({_data_db, index_db}) do
+    index_db
+    |> IndexDatabase.load_durable_version()
+    |> case do
+      {:error, :not_found} ->
+        {:ok, new(), 0, [], 0}
 
-        initial_page_map =
-          if :gb_trees.is_empty(tree) and max_page_id == 0 do
-            empty_page = Page.new(0, [])
-            %{0 => {empty_page, 0}}
-          else
-            page_map
-          end
+      {:ok, durable_version} ->
+        # Start with page 0 as the only needed page
+        needed_page_ids = MapSet.new([0])
 
-        index = %__MODULE__{
-          tree: tree,
-          page_map: initial_page_map
-        }
+        # Load pages starting from the durable version
+        case load_needed_pages(index_db, %{}, %{}, needed_page_ids, durable_version) do
+          {:ok, final_page_map} ->
+            build_index_from_page_map(final_page_map)
 
-        {:ok, index, max_page_id, free_page_ids}
-
-      {:error, :no_chain} ->
-        {:ok, new(), 0, []}
-
-      {:error, reason} ->
-        {:error, reason}
+          {:error, :missing_pages} ->
+            {:error, :missing_pages}
+        end
     end
   end
 
-  defp load_page_chain(_database, page_id, page_map) when is_map_key(page_map, page_id), do: {:error, :cycle_detected}
-
-  defp load_page_chain(database, page_id, page_map) do
-    with {:ok, {page, next_id}} <- Database.load_page(database, page_id),
-         :ok <- Page.validate(page) do
-      page_map
-      |> Map.put(page_id, {page, next_id})
-      |> load_next_page_in_chain(database, next_id)
+  # Load needed pages iteratively from older version blocks
+  # page_map: final result map (only needed pages)
+  # all_pages_seen: cumulative view of all pages (newest version wins)
+  @spec load_needed_pages(
+          IndexDatabase.t(),
+          page_map :: %{Page.id() => {Page.t(), Page.id()}},
+          all_pages_seen :: %{Page.id() => {Page.t(), Page.id()}},
+          needed_page_ids :: MapSet.t(Page.id()),
+          Bedrock.version()
+        ) :: {:ok, %{Page.id() => {Page.t(), Page.id()}}} | {:error, :missing_pages}
+  defp load_needed_pages(index_db, page_map, all_pages_seen, needed_page_ids, current_version) do
+    if MapSet.size(needed_page_ids) == 0 do
+      # No more pages needed
+      {:ok, page_map}
     else
-      {:error, :not_found} when page_id == 0 ->
-        {:error, :no_chain}
-
-      _ ->
-        {:error, :broken_chain}
+      load_needed_pages_from_version(index_db, page_map, all_pages_seen, needed_page_ids, current_version)
     end
   end
 
-  defp load_next_page_in_chain(page_map, database, next_id) do
-    case next_id do
-      0 -> {:ok, page_map}
-      next_id -> load_page_chain(database, next_id, page_map)
+  defp load_needed_pages_from_version(index_db, page_map, all_pages_seen, needed_page_ids, current_version) do
+    case IndexDatabase.load_page_block(index_db, current_version) do
+      {:ok, version_pages, next_version} ->
+        # Merge this version block with all pages seen (older pages don't override newer ones)
+        updated_all_pages = Map.merge(version_pages, all_pages_seen)
+
+        # Process each page in this version block
+        {updated_page_map, updated_needed} =
+          process_version_pages(version_pages, page_map, needed_page_ids, updated_all_pages)
+
+        load_needed_pages(index_db, updated_page_map, updated_all_pages, updated_needed, next_version)
+
+      {:error, :not_found} ->
+        {:error, :missing_pages}
     end
   end
 
-  defp calculate_free_page_ids(0, _all_existing_page_ids), do: []
+  defp process_version_pages(version_pages, page_map, needed_page_ids, updated_all_pages) do
+    Enum.reduce(version_pages, {page_map, needed_page_ids}, fn
+      {page_id, {_page, _next_id}}, {acc_map, acc_needed} ->
+        if MapSet.member?(acc_needed, page_id) do
+          process_needed_page(page_id, acc_map, acc_needed, updated_all_pages)
+        else
+          # This page is not needed - ignore it
+          {acc_map, acc_needed}
+        end
+    end)
+  end
 
-  defp calculate_free_page_ids(max_page_id, all_existing_page_ids) do
-    0..max_page_id
+  defp process_needed_page(page_id, acc_map, acc_needed, updated_all_pages) do
+    # This page is needed - use the newest version from updated_all_pages
+    {resolved_page, resolved_next_id} = Map.get(updated_all_pages, page_id)
+    new_map = Map.put(acc_map, page_id, {resolved_page, resolved_next_id})
+    new_needed = MapSet.delete(acc_needed, page_id)
+
+    # Add the page's next_id to needed if it's not already in the result map
+    final_needed =
+      if resolved_next_id != 0 and not Map.has_key?(new_map, resolved_next_id) do
+        MapSet.put(new_needed, resolved_next_id)
+      else
+        new_needed
+      end
+
+    {new_map, final_needed}
+  end
+
+  # Build final index structure from complete page map
+  @spec build_index_from_page_map(%{Page.id() => {Page.t(), Page.id()}}) ::
+          {:ok, t(), Page.id(), [Page.id()], non_neg_integer()}
+  defp build_index_from_page_map(page_map) do
+    tree = Tree.from_page_map(page_map)
+    page_ids = page_map |> Map.keys() |> MapSet.new()
+    max_id = if MapSet.size(page_ids) > 0, do: Enum.max(page_ids), else: 0
+    free_ids = calculate_free_ids(max_id, page_ids)
+
+    initial_page_map =
+      if :gb_trees.is_empty(tree) and max_id == 0 do
+        empty_page = Page.new(0, [])
+        %{0 => {empty_page, 0}}
+      else
+        page_map
+      end
+
+    # Calculate min/max keys from the tree
+    {min_key, max_key} = calculate_key_bounds(tree, initial_page_map)
+
+    # Count total keys
+    total_key_count =
+      Enum.sum_by(initial_page_map, fn {_, {page, _next_id}} -> Page.key_count(page) end)
+
+    index = %__MODULE__{
+      tree: tree,
+      page_map: initial_page_map,
+      min_key: min_key,
+      max_key: max_key
+    }
+
+    {:ok, index, max_id, free_ids, total_key_count}
+  end
+
+  defp calculate_free_ids(0, _all_existing_page_ids), do: []
+
+  defp calculate_free_ids(max_id, all_existing_page_ids) do
+    0..max_id
     |> MapSet.new()
     |> MapSet.difference(all_existing_page_ids)
     |> Enum.sort()
@@ -179,20 +270,12 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
 
   @doc """
   Finds the page containing the given key in this index.
-  Returns {:ok, Page.t()} if found, {:error, :not_found} if not found.
   """
-  @spec page_for_key(t(), Bedrock.key()) :: {:ok, Page.t()} | {:error, :not_found}
+  @spec page_for_key(t(), Bedrock.key()) :: Page.t()
   def page_for_key(%__MODULE__{tree: tree, page_map: page_map}, key) do
-    tree
-    |> Tree.page_for_key(key)
-    |> case do
-      nil ->
-        {:error, :not_found}
-
-      page_id ->
-        {page, _next_id} = Map.fetch!(page_map, page_id)
-        {:ok, page}
-    end
+    page_id = Tree.page_for_key(tree, key)
+    {page, _next_id} = Map.fetch!(page_map, page_id)
+    page
   end
 
   @doc """
@@ -201,13 +284,40 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   """
   @spec pages_for_range(t(), Bedrock.key(), Bedrock.key()) :: {:ok, [Page.t()]}
   def pages_for_range(%__MODULE__{tree: tree, page_map: page_map}, start_key, end_key) do
-    {:ok,
-     tree
-     |> Tree.page_ids_in_range(start_key, end_key)
-     |> Enum.map(fn page_id ->
-       {page, _next_id} = Map.fetch!(page_map, page_id)
-       page
-     end)}
+    # Find the first page that could contain start_key
+    first_page_id = Tree.page_for_key(tree, start_key)
+
+    # Walk the page chain until we reach a page whose last_key >= end_key
+    page_ids = collect_pages_in_range(page_map, first_page_id, end_key, [])
+
+    pages =
+      Enum.map(page_ids, fn page_id ->
+        {page, _next_id} = Map.fetch!(page_map, page_id)
+        page
+      end)
+
+    {:ok, pages}
+  end
+
+  defp collect_pages_in_range(page_map, page_id, end_key, collected_page_ids) do
+    {page, next_id} = Map.fetch!(page_map, page_id)
+    updated_collected = [page_id | collected_page_ids]
+
+    last_key = Page.right_key(page)
+
+    cond do
+      last_key != nil and last_key >= end_key ->
+        # This page covers the end of our range
+        Enum.reverse(updated_collected)
+
+      next_id == 0 ->
+        # End of chain
+        Enum.reverse(updated_collected)
+
+      true ->
+        # Continue to next page
+        collect_pages_in_range(page_map, next_id, end_key, updated_collected)
+    end
   end
 
   @doc """
@@ -243,9 +353,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   """
   @spec multi_split_page(t(), Page.id(), Page.id(), Page.t(), [Page.id()]) :: t()
   def multi_split_page(index, original_page_id, original_next_id, updated_page, new_page_ids) do
-    all_key_versions = Page.key_versions(updated_page)
+    all_key_locators = Page.key_locators(updated_page)
 
-    key_chunks = Enum.chunk_every(all_key_versions, 256)
+    key_chunks = Enum.chunk_every(all_key_locators, @max_keys_per_page)
 
     all_page_ids = [original_page_id | new_page_ids]
 
@@ -387,7 +497,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
   # Single pass through tree to find the page that comes just before target_page_id
   defp find_predecessor_optimized(iterator, target_page_id, last_page_id) do
     case :gb_trees.next(iterator) do
-      {_last_key, {page_id, _first_key}, next_iter} ->
+      {_last_key, page_id, next_iter} ->
         if page_id == target_page_id do
           # Found target page, return the previous page we saw
           last_page_id
@@ -400,5 +510,62 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Index do
         # Reached end without finding target page
         nil
     end
+  end
+
+  # Helper function to calculate min/max keys efficiently
+  defp calculate_key_bounds(tree, page_map) do
+    if :gb_trees.is_empty(tree) do
+      {<<0xFF, 0xFF>>, <<>>}
+    else
+      # Get max from tree structure (O(log n) operation)
+      {max_tree_key, _max_id} = :gb_trees.largest(tree)
+
+      # For min_key, we need to find the actual smallest first_key across all pages
+      # This is a one-time calculation during load
+      min_key = find_minimum_first_key(page_map)
+
+      {min_key, max_tree_key}
+    end
+  end
+
+  # Find the minimum first_key across all pages (only used during load)
+  defp find_minimum_first_key(page_map) when map_size(page_map) == 0, do: <<0xFF, 0xFF>>
+
+  defp find_minimum_first_key(page_map) do
+    page_map
+    |> Enum.map(fn {_page_id, {page, _next_id}} -> Page.left_key(page) end)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> <<0xFF, 0xFF>>
+      keys -> Enum.min(keys)
+    end
+  end
+
+  @doc """
+  Updates the index when a page is added, maintaining min/max key bounds.
+  """
+  @spec add_page(t(), Page.t()) :: t()
+  def add_page(%__MODULE__{} = index, page) do
+    updated_tree = Tree.add_page_to_tree(index.tree, page)
+
+    # Update min/max keys based on the new page
+    page_first_key = Page.left_key(page)
+    page_last_key = Page.right_key(page)
+
+    new_min_key =
+      if page_first_key != nil and page_first_key < index.min_key do
+        page_first_key
+      else
+        index.min_key
+      end
+
+    new_max_key =
+      if page_last_key != nil and page_last_key > index.max_key do
+        page_last_key
+      else
+        index.max_key
+      end
+
+    %{index | tree: updated_tree, min_key: new_min_key, max_key: new_max_key}
   end
 end

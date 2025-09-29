@@ -43,8 +43,7 @@ defmodule Bedrock.MixProject do
     add_deps_for_dev_and_test([
       {:bedrock_raft, git: "https://github.com/jallum/bedrock_raft.git", tag: "0.9.6"},
       {:jason, "~> 1.4"},
-      {:telemetry, "~> 1.2"},
-      {:exqlite, "~> 0.33"}
+      {:telemetry, "~> 1.2"}
     ])
   end
 

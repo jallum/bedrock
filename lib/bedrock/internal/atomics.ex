@@ -21,7 +21,8 @@ defmodule Bedrock.Internal.Atomics do
   - **Compare and clear**: Clear if values match
   """
 
-  import Bitwise
+  import Bitwise, only: [&&&: 2, |||: 2, bxor: 2, >>>: 2]
+  import Kernel, except: [min: 2, max: 2]
 
   @doc "Addition with little-endian carry propagation"
   def add(<<>>, op), do: op
@@ -161,6 +162,41 @@ defmodule Bedrock.Internal.Atomics do
   def compare_and_clear(ex, op) when ex == op, do: <<>>
   # No match, keep existing
   def compare_and_clear(ex, _op), do: ex
+
+  @doc """
+  Apply an atomic operation to an existing value with an operand.
+
+  Returns the result of the operation, or nil for compare_and_clear when cleared.
+
+  ## Examples
+
+      iex> Atomics.apply_operation(:add, <<5>>, <<3>>)
+      <<8>>
+
+      iex> Atomics.apply_operation(:min, <<10>>, <<5>>)
+      <<5>>
+
+      iex> Atomics.apply_operation(:compare_and_clear, <<5>>, <<5>>)
+      nil
+  """
+  @spec apply_operation(atom(), binary(), binary()) :: binary() | nil
+  def apply_operation(:add, existing_value, operand), do: add(existing_value, operand)
+  def apply_operation(:min, existing_value, operand), do: min(existing_value, operand)
+  def apply_operation(:max, existing_value, operand), do: max(existing_value, operand)
+  def apply_operation(:bit_and, existing_value, operand), do: bit_and(existing_value, operand)
+  def apply_operation(:bit_or, existing_value, operand), do: bit_or(existing_value, operand)
+  def apply_operation(:bit_xor, existing_value, operand), do: bit_xor(existing_value, operand)
+  def apply_operation(:byte_min, existing_value, operand), do: byte_min(existing_value, operand)
+  def apply_operation(:byte_max, existing_value, operand), do: byte_max(existing_value, operand)
+  def apply_operation(:append_if_fits, existing_value, operand), do: append_if_fits(existing_value, operand)
+
+  def apply_operation(:compare_and_clear, existing_value, expected) do
+    case compare_and_clear(existing_value, expected) do
+      # Return nil when cleared
+      <<>> -> nil
+      result -> result
+    end
+  end
 
   # Helper functions
   defp pad_or_truncate(value, target_size) do

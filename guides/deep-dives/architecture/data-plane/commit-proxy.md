@@ -44,11 +44,13 @@ Each batch advances through a precisely defined sequence of eight states managed
 ---
 
 #### Step 1: Batch Initialization
+
 **State Transition**: `:initialized → :created`
 
 **Purpose**: Capture batch metadata and establish [version](../../../glossary.md#version) context
 
 **Actions Performed**:
+
 - Assign a unique commit version to the batch
 - Initialize the `FinalizationPlan` structure
 - Record batch creation timestamp and metadata
@@ -58,11 +60,13 @@ Each batch advances through a precisely defined sequence of eight states managed
 ---
 
 #### Step 2: Transaction Preparation  
+
 **State Transition**: `:created → :ready_for_resolution`
 
 **Purpose**: Transform transactions for conflict detection processing
 
 **Actions Performed**:
+
 - Extract conflict information from transaction payloads
 - Organize read and write conflicts by key ranges
 - Prepare transaction summaries for resolver coordination
@@ -72,11 +76,13 @@ Each batch advances through a precisely defined sequence of eight states managed
 ---
 
 #### Step 3: Conflict Resolution
+
 **State Transition**: `:ready_for_resolution → :conflicts_resolved`
 
 **Purpose**: Coordinate with [Resolvers](../../../glossary.md#resolver) to detect conflicts
 
 **Actions Performed**:
+
 - Distribute transactions to appropriate resolvers based on key ranges
 - Execute parallel conflict detection across all affected resolvers
 - Collect conflict resolution results and retry on transient failures
@@ -121,11 +127,13 @@ The system implements exponential backoff with configurable retry limits (defaul
 ---
 
 #### Step 4: Abort Notification
+
 **State Transition**: `:conflicts_resolved → :aborts_notified`
 
 **Purpose**: Separate successful transactions from aborted ones, send immediate abort responses
 
 **Actions Performed**:
+
 - Identify transactions that failed conflict resolution
 - Send immediate error responses to clients of aborted transactions
 - Update reply tracking to prevent duplicate notifications
@@ -136,11 +144,13 @@ The system implements exponential backoff with configurable retry limits (defaul
 ---
 
 #### Step 5: Logging Preparation
+
 **State Transition**: `:aborts_notified → :ready_for_logging`
 
 **Purpose**: Organize mutations by [storage team](../../../glossary.md#storage-team) tags for efficient distribution
 
 **Actions Performed**:
+
 - Map transaction keys to storage team tags
 - Group mutations by responsible log servers
 - Optimize data distribution to minimize network overhead
@@ -172,11 +182,13 @@ The distribution algorithm ensures each log server receives exactly the mutation
 ---
 
 #### Step 6: Durable Persistence
+
 **State Transition**: `:ready_for_logging → :logged`
 
 **Purpose**: Push transactions to all required [log servers](../../../glossary.md#log) and await acknowledgments
 
 **Actions Performed**:
+
 - Transmit mutations to all required log servers in parallel
 - Wait for acknowledgment from every required log server
 - Enforce all-or-nothing durability guarantee
@@ -199,11 +211,13 @@ The logging system enforces strict all-or-nothing durability through parallel pu
 ---
 
 #### Step 7: Version Coordination
+
 **State Transition**: `:logged → :sequencer_notified`
 
 **Purpose**: Report successful commits to [Sequencer](../../../glossary.md#sequencer) for version tracking
 
 **Actions Performed**:
+
 - Notify sequencer of successful commit version advancement
 - Update global version state for future transaction processing
 - Maintain version consistency across the system
@@ -213,11 +227,13 @@ The logging system enforces strict all-or-nothing durability through parallel pu
 ---
 
 #### Step 8: Client Notification
+
 **State Transition**: `:sequencer_notified → :completed`
 
 **Purpose**: Send success responses to clients and complete processing
 
 **Actions Performed**:
+
 - Send success responses to all remaining clients
 - Update reply tracking to mark all transactions as notified
 - Complete the finalization plan and clean up batch state
@@ -235,7 +251,6 @@ The linear progression incorporates comprehensive safety mechanisms at each step
 - **Fail-Fast Design**: Pipeline failures at any step trigger clean abortion of all unreplied transactions with proper client notification
 - **Error Recovery**: Transient failures are handled through exponential backoff retry logic with configurable limits
 - **State Persistence**: Each state transition is atomic, ensuring the pipeline can recover from failures without data loss
-
 
 ## Operational Considerations
 
@@ -267,7 +282,7 @@ The system provides comprehensive operational visibility through structured [tel
 %{n_transactions: count}, %{commit_version: version, started_at: timestamp}
 
 [:bedrock, :data_plane, :commit_proxy, :stop]  
-%{n_oks: successes, n_aborts: aborts, duration_us: duration}
+%{n_oks: successes, n_aborts: aborts, duration_μs: duration}
 ```
 
 Essential metrics for operational health monitoring:

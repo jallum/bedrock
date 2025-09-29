@@ -101,9 +101,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.KeySelectorPropertyTest do
             end)
 
           versions = List.duplicate(<<0, 0, 0, 0, 0, 0, 0, 1>>, 50)
-          key_versions = Enum.zip(keys, versions)
+          key_locators = Enum.zip(keys, versions)
           next_id = if page_id == page_count - 1, do: 0, else: page_id + 1
-          page = Page.new(page_id, key_versions)
+          page = Page.new(page_id, key_locators)
           {page, next_id}
         end
 
@@ -212,7 +212,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.KeySelectorPropertyTest do
 
   # Helper functions
 
-  defp create_index_manager(index), do: %IndexManager{versions: [{1, index}], current_version: 1}
+  defp create_index_manager(index), do: %IndexManager{versions: [{1, {index, %{}}}], current_version: 1}
 
   defp get_all_keys_from_index(%Index{page_map: page_map}) do
     page_map

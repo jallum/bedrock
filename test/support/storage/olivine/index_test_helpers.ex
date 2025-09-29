@@ -5,7 +5,6 @@ defmodule Bedrock.Test.Storage.Olivine.IndexTestHelpers do
 
   alias Bedrock.DataPlane.Storage.Olivine.Index
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
-  alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
 
   @doc """
   Rebuilds page chain consistency from the tree structure.
@@ -21,7 +20,7 @@ defmodule Bedrock.Test.Storage.Olivine.IndexTestHelpers do
 
   @spec rebuild_page_chain_from_tree(:gb_trees.tree(), map()) :: map()
   defp rebuild_page_chain_from_tree(tree, page_map) do
-    tree_page_ids = Tree.page_ids_in_range(tree, <<>>, <<0xFF, 0xFF, 0xFF, 0xFF>>)
+    tree_page_ids = tree |> :gb_trees.to_list() |> Enum.map(fn {_key, page_id} -> page_id end)
 
     case tree_page_ids do
       [] -> create_empty_page_0(page_map)

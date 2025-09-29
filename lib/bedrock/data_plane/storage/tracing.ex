@@ -1,6 +1,8 @@
 defmodule Bedrock.DataPlane.Storage.Tracing do
   @moduledoc false
 
+  alias Bedrock.Internal.Time
+
   require Logger
 
   @spec handler_id() :: String.t()
@@ -17,16 +19,15 @@ defmodule Bedrock.DataPlane.Storage.Tracing do
         [:bedrock, :storage, :log_marked_as_failed],
         [:bedrock, :storage, :log_pull_circuit_breaker_tripped],
         [:bedrock, :storage, :log_pull_circuit_breaker_reset],
-        [:bedrock, :storage, :window_advancement_no_eviction],
-        [:bedrock, :storage, :window_advancement_evicting],
-        [:bedrock, :storage, :window_advancement_complete],
         [:bedrock, :storage, :startup_start],
         [:bedrock, :storage, :startup_complete],
         [:bedrock, :storage, :startup_failed],
         [:bedrock, :storage, :shutdown_start],
         [:bedrock, :storage, :shutdown_complete],
         [:bedrock, :storage, :shutdown_waiting],
-        [:bedrock, :storage, :shutdown_timeout]
+        [:bedrock, :storage, :shutdown_timeout],
+        [:bedrock, :storage, :read_request_start],
+        [:bedrock, :storage, :read_request_complete]
       ],
       &__MODULE__.handler/4,
       nil
@@ -49,11 +50,8 @@ defmodule Bedrock.DataPlane.Storage.Tracing do
   def log_event(:pull_start, _, %{start_after: start_after}),
     do: debug("Log pull started after #{inspect(start_after)}")
 
-  def log_event(:pull_succeeded, _, %{timestamp: timestamp, n_transactions: n_transactions}),
-    do:
-      debug(
-        "Log pull succeeded at #{Bedrock.DataPlane.Version.to_string(timestamp)} with #{n_transactions} transactions"
-      )
+  def log_event(:pull_succeeded, %{count: count}, %{start_after: start_after}),
+    do: debug("Log pull succeeded after #{inspect(start_after)} with #{count} transactions")
 
   def log_event(:pull_failed, _, %{timestamp: timestamp, reason: reason}),
     do: warn("Log pull failed at #{Bedrock.DataPlane.Version.to_string(timestamp)}: #{inspect(reason)}")
@@ -76,22 +74,6 @@ defmodule Bedrock.DataPlane.Storage.Tracing do
   def log_event(:transaction_applied, _, %{version: version, n_keys: n_keys}),
     do: debug("Transaction applied at version #{Bedrock.DataPlane.Version.to_string(version)} (#{n_keys} keys)")
 
-  def log_event(:window_advancement_no_eviction, _, %{worker_id: worker_id}),
-    do: debug("Window advancement considered for #{worker_id}, no eviction needed")
-
-  def log_event(:window_advancement_evicting, _, %{
-        worker_id: worker_id,
-        new_durable_version: version,
-        n_evicted: n_evicted
-      }),
-      do:
-        info(
-          "Window advancement for #{worker_id}: evicting #{n_evicted} versions, new durable version #{Bedrock.DataPlane.Version.to_string(version)}"
-        )
-
-  def log_event(:window_advancement_complete, _, %{worker_id: worker_id, new_durable_version: version}),
-    do: info("Window advancement complete for #{worker_id} at version #{Bedrock.DataPlane.Version.to_string(version)}")
-
   def log_event(:startup_start, _, %{otp_name: otp_name}), do: info("Storage startup initiated: #{otp_name}")
 
   def log_event(:startup_complete, _, %{otp_name: otp_name}), do: info("Storage startup complete: #{otp_name}")
@@ -109,6 +91,43 @@ defmodule Bedrock.DataPlane.Storage.Tracing do
 
   def log_event(:shutdown_timeout, _, %{n_tasks: n_tasks}),
     do: warn("Storage shutdown timeout with #{n_tasks} tasks still running")
+
+  def log_event(:read_request_start, _measurements, metadata) do
+    otp_name = Map.get(metadata, :otp_name, "unknown")
+    operation = Map.get(metadata, :operation, "unknown")
+    key = Map.get(metadata, :key)
+    key_str = format_key(key)
+    debug("#{otp_name}: Read request started (operation: #{operation}, key: #{key_str})")
+  end
+
+  def log_event(:read_request_complete, measurements, metadata) do
+    duration_μs = Map.get(measurements, :duration_μs, 0)
+    otp_name = Map.get(metadata, :otp_name, "unknown")
+    operation = Map.get(metadata, :operation, "unknown")
+    key = Map.get(metadata, :key)
+    key_str = format_key(key)
+
+    info(
+      "#{otp_name}: Read request completed (operation: #{operation}, key: #{key_str}, duration: #{Time.Interval.humanize({:microsecond, duration_μs})})"
+    )
+  end
+
+  defp format_key(key) when is_binary(key) do
+    if String.printable?(key) and byte_size(key) <= 50 do
+      "\"#{key}\""
+    else
+      hex = Base.encode16(key, case: :lower)
+      "0x#{hex}"
+    end
+  end
+
+  defp format_key({start_key, end_key}) do
+    start_str = format_key(start_key)
+    end_str = format_key(end_key)
+    "{#{start_str}, #{end_str}}"
+  end
+
+  defp format_key(key), do: inspect(key)
 
   @spec debug(String.t()) :: :ok
   defp debug(message) do

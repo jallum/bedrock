@@ -12,6 +12,7 @@ defmodule Bedrock.DataPlane.Storage.Olivine.AtomicOperationsTest do
   use ExUnit.Case, async: true
 
   alias Bedrock.DataPlane.Storage.Olivine.Database, as: OlivineDatabase
+  alias Bedrock.DataPlane.Storage.Olivine.Index
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
   alias Bedrock.DataPlane.Transaction
   alias Bedrock.DataPlane.Version
@@ -22,8 +23,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.AtomicOperationsTest do
       temp_dir = System.tmp_dir!() <> "/test_olivine_#{System.unique_integer()}"
       File.mkdir_p!(temp_dir)
 
-      db_file_path = Path.join(temp_dir, "olivine_test.sqlite")
-      {:ok, database} = OlivineDatabase.open(:"test_db_#{System.unique_integer()}", db_file_path, pool_size: 1)
+      db_file_path = Path.join(temp_dir, "olivine_test.dets")
+      {:ok, database} = OlivineDatabase.open(:"test_db_#{System.unique_integer()}", db_file_path)
       index_manager = IndexManager.new()
 
       on_exit(fn ->
@@ -44,11 +45,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.AtomicOperationsTest do
       index_manager: index_manager
     } do
       initial_transaction = create_set_transaction("balance", <<100>>, 1)
-      manager_with_initial = IndexManager.apply_transaction(index_manager, initial_transaction, database)
+
+      {manager_with_initial, database_with_initial} =
+        IndexManager.apply_transaction(index_manager, initial_transaction, database)
 
       add_transaction = create_atomic_transaction([{:atomic, :add, "balance", <<231>>}], 2)
       # Verify the result (100 + 231 with carry = 75 as next byte)
-      apply_and_verify(manager_with_initial, add_transaction, database, [{"balance", <<75, 1>>}])
+      apply_and_verify(manager_with_initial, add_transaction, database_with_initial, [{"balance", <<75, 1>>}])
     end
 
     test "min and max work correctly", %{database: database, index_manager: index_manager} do
@@ -68,11 +71,17 @@ defmodule Bedrock.DataPlane.Storage.Olivine.AtomicOperationsTest do
   # Helper functions
 
   defp apply_and_verify(index_manager, transaction, database, expected_values) do
-    _updated_manager = IndexManager.apply_transaction(index_manager, transaction, database)
+    {updated_manager, updated_database} = IndexManager.apply_transaction(index_manager, transaction, database)
     version = Transaction.commit_version!(transaction)
 
+    # Get the current index from the updated manager
+    [{^version, {current_index, _modified_pages}} | _] = updated_manager.versions
+
     for {key, expected_value} <- expected_values do
-      assert {:ok, ^expected_value} = OlivineDatabase.load_value(database, key, version)
+      # Get locator for the key from the index
+      {:ok, _page, locator} = Index.locator_for_key(current_index, key)
+      # Load value using the locator
+      assert {:ok, ^expected_value} = OlivineDatabase.load_value(updated_database, locator)
     end
   end
 

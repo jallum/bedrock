@@ -4,7 +4,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.State do
   alias Bedrock.ControlPlane.Director
   alias Bedrock.DataPlane.Storage.Olivine.Database
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
-  alias Bedrock.Internal.WaitingList
+  alias Bedrock.DataPlane.Storage.Olivine.IntakeQueue
+  alias Bedrock.DataPlane.Storage.Olivine.Reading
   alias Bedrock.Service.Foreman
   alias Bedrock.Service.Worker
 
@@ -19,8 +20,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.State do
           epoch: Bedrock.epoch() | nil,
           director: Director.ref() | nil,
           mode: :locked | :running,
-          waiting_fetches: WaitingList.t(),
-          active_tasks: MapSet.t(pid())
+          read_request_manager: Reading.t(),
+          intake_queue: IntakeQueue.t(),
+          window_lag_time_μs: non_neg_integer()
         }
   defstruct otp_name: nil,
             path: nil,
@@ -32,8 +34,9 @@ defmodule Bedrock.DataPlane.Storage.Olivine.State do
             epoch: nil,
             director: nil,
             mode: :locked,
-            waiting_fetches: %{},
-            active_tasks: MapSet.new()
+            read_request_manager: Reading.new(),
+            intake_queue: IntakeQueue.new(),
+            window_lag_time_μs: 5_000_000
 
   @spec update_mode(t(), :locked | :running) :: t()
   def update_mode(t, mode), do: %{t | mode: mode}
@@ -46,16 +49,4 @@ defmodule Bedrock.DataPlane.Storage.Olivine.State do
 
   @spec put_puller(t(), Task.t()) :: t()
   def put_puller(t, pull_task), do: %{t | pull_task: pull_task}
-
-  @spec add_active_task(t(), pid()) :: t()
-  def add_active_task(t, task_pid) do
-    Process.monitor(task_pid)
-    %{t | active_tasks: MapSet.put(t.active_tasks, task_pid)}
-  end
-
-  @spec remove_active_task(t(), pid()) :: t()
-  def remove_active_task(t, task_pid), do: %{t | active_tasks: MapSet.delete(t.active_tasks, task_pid)}
-
-  @spec get_active_tasks(t()) :: MapSet.t(pid())
-  def get_active_tasks(t), do: t.active_tasks
 end

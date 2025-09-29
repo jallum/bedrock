@@ -360,7 +360,7 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.Tx do
     case :gb_trees.lookup(key, t.writes) do
       {:value, {op, operand}} ->
         base_value = get_current_binary_value(t, key)
-        apply_atomic_operation(op, base_value, operand)
+        Atomics.apply_operation(op, base_value, operand) || <<>>
 
       {:value, v} ->
         v
@@ -498,26 +498,11 @@ defmodule Bedrock.Cluster.Gateway.TransactionBuilder.Tx do
   # Private Helper Functions - Atomic Operations
   # =============================================================================
 
-  # Centralized atomic operation dispatch
-  @spec apply_atomic_operation(atom(), binary(), binary()) :: binary()
-  defp apply_atomic_operation(:add, base_value, operand), do: Atomics.add(base_value, operand)
-  defp apply_atomic_operation(:min, base_value, operand), do: Atomics.min(base_value, operand)
-  defp apply_atomic_operation(:max, base_value, operand), do: Atomics.max(base_value, operand)
-  defp apply_atomic_operation(:bit_and, base_value, operand), do: Atomics.bit_and(base_value, operand)
-  defp apply_atomic_operation(:bit_or, base_value, operand), do: Atomics.bit_or(base_value, operand)
-  defp apply_atomic_operation(:bit_xor, base_value, operand), do: Atomics.bit_xor(base_value, operand)
-  defp apply_atomic_operation(:byte_min, base_value, operand), do: Atomics.byte_min(base_value, operand)
-  defp apply_atomic_operation(:byte_max, base_value, operand), do: Atomics.byte_max(base_value, operand)
-  defp apply_atomic_operation(:append_if_fits, base_value, operand), do: Atomics.append_if_fits(base_value, operand)
-
-  defp apply_atomic_operation(:compare_and_clear, base_value, expected),
-    do: Atomics.compare_and_clear(base_value, expected) || <<>>
-
   # Apply atomic operation to storage value for range queries
   # storage_value is the value from storage servers (nil if not found)
   @doc false
   def apply_atomic_to_storage_value({op, operand}, storage_value),
-    do: apply_atomic_operation(op, storage_value || <<>>, operand)
+    do: Atomics.apply_operation(op, storage_value || <<>>, operand) || <<>>
 
   @doc false
   def apply_atomic_to_storage_value(value, _storage_value), do: value

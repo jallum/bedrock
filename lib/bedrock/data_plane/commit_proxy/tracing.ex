@@ -43,15 +43,15 @@ defmodule Bedrock.DataPlane.CommitProxy.Tracing do
     info("Transaction Batch #{Version.to_string(commit_version)} started with #{n_transactions} transactions")
   end
 
-  def trace(:stop, %{n_aborts: n_aborts, n_oks: n_oks, duration_us: duration_us}, %{commit_version: commit_version}) do
+  def trace(:stop, %{n_aborts: n_aborts, n_oks: n_oks, duration_μs: duration_μs}, %{commit_version: commit_version}) do
     info(
-      "Transaction Batch #{Version.to_string(commit_version)} completed with #{n_aborts} aborts and #{n_oks} oks in #{humanize({:microsecond, duration_us})}"
+      "Transaction Batch #{Version.to_string(commit_version)} completed with #{n_aborts} aborts and #{n_oks} oks in #{humanize({:microsecond, duration_μs})}"
     )
   end
 
-  def trace(:failed, %{duration_us: duration_us, commit_version: commit_version}, %{reason: reason}) do
+  def trace(:failed, %{duration_μs: duration_μs, commit_version: commit_version}, %{reason: reason}) do
     error(
-      "Transaction Batch #{Version.to_string(commit_version)} failed (#{inspect(reason)}) in #{humanize({:microsecond, duration_us})}"
+      "Transaction Batch #{Version.to_string(commit_version)} failed (#{inspect(reason)}) in #{humanize({:microsecond, duration_μs})}"
     )
   end
 

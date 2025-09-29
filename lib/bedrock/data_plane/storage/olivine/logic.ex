@@ -8,21 +8,22 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   alias Bedrock.ControlPlane.Director
   alias Bedrock.DataPlane.Storage
   alias Bedrock.DataPlane.Storage.Olivine.Database
-  alias Bedrock.DataPlane.Storage.Olivine.Index.Page
   alias Bedrock.DataPlane.Storage.Olivine.IndexManager
   alias Bedrock.DataPlane.Storage.Olivine.Pulling
   alias Bedrock.DataPlane.Storage.Olivine.State
+  alias Bedrock.DataPlane.Storage.Olivine.Telemetry, as: OlivineTelemetry
   alias Bedrock.DataPlane.Storage.Telemetry
   alias Bedrock.DataPlane.Transaction
-  alias Bedrock.Internal.WaitingList
-  alias Bedrock.KeySelector
+  alias Bedrock.DataPlane.Version
   alias Bedrock.Service.Worker
 
+  @spec startup(otp_name :: atom(), foreman :: pid(), id :: Worker.id(), Path.t()) ::
+          {:ok, State.t()} | {:error, File.posix()} | {:error, term()}
   @spec startup(otp_name :: atom(), foreman :: pid(), id :: Worker.id(), Path.t(), db_opts :: keyword()) ::
           {:ok, State.t()} | {:error, File.posix()} | {:error, term()}
   def startup(otp_name, foreman, id, path, db_opts \\ []) do
     with :ok <- ensure_directory_exists(path),
-         {:ok, database} <- Database.open(:"#{otp_name}_db", Path.join(path, "#{id}.sqlite"), db_opts),
+         {:ok, database} <- Database.open(:"#{otp_name}_db", Path.join(path, "dets"), db_opts),
          {:ok, index_manager} <- IndexManager.recover_from_database(database) do
       {:ok,
        %State{
@@ -42,7 +43,6 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   @spec shutdown(State.t()) :: :ok
   def shutdown(%State{} = t) do
     stop_pulling(t)
-    notify_waitlist_shutdown(t.waiting_fetches)
     :ok = Database.close(t.database)
   end
 
@@ -78,6 +78,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
       Transaction.commit_version!(last_transaction)
     end
 
+    database = t.database
+
     puller =
       Pulling.start_pulling(
         durable_version,
@@ -85,256 +87,13 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
         logs,
         services,
         apply_and_notify_fn,
-        fn ->
-          try do
-            case GenServer.call(main_process_pid, {:info, :durable_version}, 1000) do
-              {:ok, version} -> version
-              _ -> raise "Failed to get current durable version"
-            end
-          catch
-            :exit, _ -> raise "Failed to get current durable version"
-          end
-        end
+        fn -> Database.load_current_durable_version(database) end
       )
 
     t
     |> update_mode(:running)
     |> put_puller(puller)
     |> then(&{:ok, &1})
-  end
-
-  @doc """
-  Fetch function with optional async callback support.
-
-  When reply_fn is provided in opts, returns :ok immediately and delivers results via callback.
-  When reply_fn is not provided, returns results synchronously (primarily for testing).
-  """
-  def get(state, key_or_selector, version, opts \\ [])
-
-  @spec get(State.t(), Bedrock.key(), Bedrock.version(), opts :: [reply_fn: function()]) ::
-          {:ok, binary()}
-          | {:ok, pid()}
-          | {:error, :not_found}
-          | {:error, :version_too_old}
-          | {:error, :version_too_new}
-  def get(%State{} = t, key, version, opts) when is_binary(key) do
-    t.index_manager
-    |> IndexManager.page_for_key(key, version)
-    |> case do
-      {:ok, page} ->
-        load_fn = Database.value_loader(t.database)
-
-        do_now_or_async_with_reply(opts[:reply_fn], fn ->
-          fetch_from_page(page, key, load_fn)
-        end)
-
-      error ->
-        error
-    end
-  end
-
-  @spec get(State.t(), KeySelector.t(), Bedrock.version(), opts :: [reply_fn: function()]) ::
-          {:ok, {resolved_key :: binary(), value :: binary()}}
-          | {:ok, pid()}
-          | {:error, :not_found}
-          | {:error, :version_too_old}
-          | {:error, :version_too_new}
-  def get(%State{} = t, %KeySelector{} = key_selector, version, opts) do
-    case IndexManager.page_for_key(t.index_manager, key_selector, version) do
-      {:ok, resolved_key, page} ->
-        load_fn = Database.value_loader(t.database)
-        fetch_task = fn -> fetch_resolved_key_selector(page, resolved_key, load_fn) end
-        do_now_or_async_with_reply(opts[:reply_fn], fetch_task)
-
-      error ->
-        error
-    end
-  end
-
-  defp fetch_resolved_key_selector(page, resolved_key, load_fn) do
-    case fetch_from_page(page, resolved_key, load_fn) do
-      {:ok, value} -> {:ok, {resolved_key, value}}
-      error -> error
-    end
-  end
-
-  defp fetch_from_page(page, key, load_fn) do
-    case Page.version_for_key(page, key) do
-      {:ok, version} -> load_fn.(key, version)
-      error -> error
-    end
-  end
-
-  @doc """
-  Range fetch function with optional async callback support.
-
-  When reply_fn is provided in opts, returns :ok immediately and delivers results via callback.
-  When reply_fn is not provided, returns results synchronously (primarily for testing).
-  """
-  def get_range(t, start_key_or_selector, end_key_or_selector, version, opts \\ [])
-
-  @spec get_range(
-          State.t(),
-          Bedrock.key(),
-          Bedrock.key(),
-          Bedrock.version(),
-          opts :: [reply_fn: function(), limit: pos_integer()]
-        ) ::
-          {:ok, {[{Bedrock.key(), Bedrock.value()}], more :: boolean()}}
-          | {:ok, pid()}
-          | {:error, :version_too_old}
-          | {:error, :version_too_new}
-  def get_range(t, start_key, end_key, version, opts) when is_binary(start_key) and is_binary(end_key) do
-    t.index_manager
-    |> IndexManager.pages_for_range(start_key, end_key, version)
-    |> case do
-      {:ok, pages} ->
-        load_fn = Database.value_loader(t.database)
-        limit = opts[:limit]
-
-        do_now_or_async_with_reply(opts[:reply_fn], fn ->
-          range_fetch_from_pages(pages, start_key, end_key, limit, load_fn)
-        end)
-
-      error ->
-        error
-    end
-  end
-
-  @spec get_range(
-          State.t(),
-          KeySelector.t(),
-          KeySelector.t(),
-          Bedrock.version(),
-          opts :: [reply_fn: function(), limit: pos_integer()]
-        ) ::
-          {:ok, {[{Bedrock.key(), Bedrock.value()}], more :: boolean()}}
-          | {:ok, pid()}
-          | {:error, :version_too_old}
-          | {:error, :version_too_new}
-          | {:error, :not_found}
-          | {:error, :invalid_range}
-  def get_range(t, %KeySelector{} = start_selector, %KeySelector{} = end_selector, version, opts) do
-    case IndexManager.pages_for_range(t.index_manager, start_selector, end_selector, version) do
-      {:ok, {resolved_start_key, resolved_end_key}, pages} ->
-        load_fn = Database.value_loader(t.database)
-        limit = opts[:limit]
-
-        do_now_or_async_with_reply(opts[:reply_fn], fn ->
-          range_fetch_from_pages(pages, resolved_start_key, resolved_end_key, limit, load_fn)
-        end)
-
-      error ->
-        error
-    end
-  end
-
-  defp range_fetch_from_pages(pages, start_key, end_key, limit, load_fn) do
-    stream = Page.stream_key_versions_in_range(pages, start_key, end_key)
-
-    {results, has_more} =
-      case limit do
-        nil ->
-          results =
-            Enum.map(stream, fn {key, version} ->
-              {:ok, value} = load_fn.(key, version)
-              {key, value}
-            end)
-
-          {results, false}
-
-        limit when is_integer(limit) and limit > 0 ->
-          # Use reduce_while to process only up to limit + early termination detection
-          {results, has_more} =
-            stream
-            |> Stream.with_index()
-            |> Enum.reduce_while({[], false}, &process_indexed_item(&1, &2, limit, load_fn))
-
-          {Enum.reverse(results), has_more}
-      end
-
-    {:ok, {results, has_more}}
-  end
-
-  defp process_indexed_item({{key, version}, index}, {acc, _}, limit, load_fn) do
-    if index < limit do
-      {:ok, value} = load_fn.(key, version)
-      {:cont, {[{key, value} | acc], false}}
-    else
-      {:halt, {acc, true}}
-    end
-  end
-
-  @doc """
-  Adds a fetch request to the waitlist.
-
-  Used by the Server when a version_too_new error occurs and wait_ms is specified.
-  """
-  @spec add_to_waitlist(State.t(), term(), Bedrock.version(), function(), pos_integer()) :: State.t()
-  def add_to_waitlist(%State{} = t, fetch_request, version, reply_fn, timeout_in_ms) do
-    {new_waiting, _timeout} = WaitingList.insert(t.waiting_fetches, version, fetch_request, reply_fn, timeout_in_ms)
-    %{t | waiting_fetches: new_waiting}
-  end
-
-  @spec notify_waiting_fetches(State.t(), Bedrock.version()) :: State.t()
-  def notify_waiting_fetches(%State{} = t, applied_version) do
-    {new_waiting, fetches_to_run} = WaitingList.remove_all(t.waiting_fetches, applied_version)
-
-    updated_state =
-      Enum.reduce(fetches_to_run, %{t | waiting_fetches: new_waiting}, fn
-        {_deadline, reply_fn, fetch_request}, acc_state ->
-          case run_fetch_and_notify(acc_state, reply_fn, fetch_request) do
-            {:ok, pid} -> State.add_active_task(acc_state, pid)
-            :ok -> acc_state
-          end
-      end)
-
-    updated_state
-  end
-
-  defp run_fetch_and_notify(t, reply_fn, {key, version}) when is_binary(key) do
-    case get(t, key, version, reply_fn: reply_fn) do
-      {:ok, pid} ->
-        {:ok, pid}
-
-      error ->
-        reply_fn.(error)
-        :ok
-    end
-  end
-
-  defp run_fetch_and_notify(t, reply_fn, {start_key, end_key, version})
-       when is_binary(start_key) and is_binary(end_key) do
-    case get_range(t, start_key, end_key, version, reply_fn: reply_fn) do
-      {:ok, pid} ->
-        {:ok, pid}
-
-      error ->
-        reply_fn.(error)
-        :ok
-    end
-  end
-
-  defp run_fetch_and_notify(t, reply_fn, {%KeySelector{} = key_selector, version}) do
-    case get(t, key_selector, version, reply_fn: reply_fn) do
-      {:ok, pid} ->
-        {:ok, pid}
-
-      error ->
-        reply_fn.(error)
-        :ok
-    end
-  end
-
-  defp run_fetch_and_notify(t, reply_fn, {%KeySelector{} = start_selector, %KeySelector{} = end_selector, version}) do
-    case get_range(t, start_selector, end_selector, version, reply_fn: reply_fn) do
-      {:ok, pid} ->
-        {:ok, pid}
-
-      error ->
-        reply_fn.(error)
-        :ok
-    end
   end
 
   @spec info(State.t(), Storage.fact_name() | [Storage.fact_name()]) ::
@@ -365,16 +124,8 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
       utilization
     ]a
 
-  defp gather_info(:oldest_durable_version, t) do
-    {:ok, version} = Database.load_durable_version(t.database)
-    version
-  end
-
-  defp gather_info(:durable_version, t) do
-    {:ok, version} = Database.load_durable_version(t.database)
-    version
-  end
-
+  defp gather_info(:oldest_durable_version, t), do: Database.durable_version(t.database)
+  defp gather_info(:durable_version, t), do: Database.durable_version(t.database)
   defp gather_info(:id, t), do: t.id
   defp gather_info(:key_ranges, t), do: IndexManager.info(t.index_manager, :key_ranges)
   defp gather_info(:kind, _t), do: :storage
@@ -387,71 +138,96 @@ defmodule Bedrock.DataPlane.Storage.Olivine.Logic do
   defp gather_info(:utilization, t), do: IndexManager.info(t.index_manager, :utilization)
   defp gather_info(_unsupported, _t), do: {:error, :unsupported_info}
 
+  # Window advancement constants
+
+  defp max_eviction_size, do: 10 * 1024 * 1024
+
   @doc """
-  Advances the window with persistence coordination between IndexManager and Database.
-  Logic module provides high-level coordination:
-  - IndexManager determines what needs to be done for window advancement
-  - Database handles persistence operations
-  - State gets updated with results
+  Performs window advancement by delegating policy decisions to IndexManager and handling persistence.
+  IndexManager determines what to evict based on buffer tracking and hot set management.
+  Logic handles database persistence and telemetry for the eviction.
   """
-  @spec advance_window_with_persistence(State.t()) :: {:ok, State.t()} | {:error, term()}
-  def advance_window_with_persistence(%State{} = state) do
-    case IndexManager.prepare_window_advancement(state.index_manager) do
-      :no_eviction ->
-        # Trace that window advancement was considered but no eviction was needed
-        Telemetry.trace_window_advancement_no_eviction(state.id)
-        {:ok, state}
+  @spec advance_window(State.t()) :: {:ok, State.t()} | {:error, term()}
+  def advance_window(%State{} = state) do
+    start_time = System.monotonic_time(:microsecond)
 
-      {:evict, new_durable_version, evicted_versions, index_manager} ->
-        # Trace that window advancement is evicting data
-        Telemetry.trace_window_advancement_evicting(state.id, new_durable_version, length(evicted_versions))
+    case IndexManager.advance_window(state.index_manager, max_eviction_size()) do
+      {:no_eviction, updated_index_manager} ->
+        updated_state = %{state | index_manager: updated_index_manager}
+        {:ok, updated_state}
 
-        with {:ok, database} <-
-               Database.advance_durable_version(
-                 state.database,
-                 new_durable_version,
-                 evicted_versions
-               ) do
-          Telemetry.trace_window_advancement_complete(state.id, new_durable_version)
-          {:ok, %{state | index_manager: index_manager, database: database}}
-        end
+      {:evict, evicted_count, updated_index_manager, collected_pages, eviction_version} ->
+        window_edge = calculate_window_edge_for_telemetry(eviction_version, state.window_lag_time_μs)
+        {data_db, _index_db} = state.database
+
+        current_durable_version = Database.durable_version(state.database)
+
+        {:ok, updated_database, db_pipeline} =
+          Database.advance_durable_version(
+            state.database,
+            eviction_version,
+            current_durable_version,
+            data_db.file_offset,
+            collected_pages
+          )
+
+        updated_state = %{state | index_manager: updated_index_manager, database: updated_database}
+
+        duration = System.monotonic_time(:microsecond) - start_time
+        lag_time_μs = calculate_lag_time_μs(window_edge, eviction_version)
+
+        OlivineTelemetry.trace_window_advanced(:evicted, eviction_version,
+          duration_μs: duration,
+          evicted_count: evicted_count,
+          lag_time_μs: lag_time_μs,
+          window_target_version: window_edge,
+          data_size_in_bytes: data_db.file_offset,
+          durable_version_duration_μs: db_pipeline.total_duration_μs,
+          db_insert_time_μs: db_pipeline.insert_time_μs,
+          db_write_time_μs: db_pipeline.write_time_μs
+        )
+
+        {:ok, updated_state}
     end
   end
 
-  defp notify_waitlist_shutdown(waiting_fetches) do
-    waiting_fetches
-    |> Enum.flat_map(fn {_version, entries} -> entries end)
-    |> Enum.each(fn {_deadline, reply_fn, _fetch_request} ->
-      reply_fn.({:error, :shutting_down})
-    end)
+  # Helper to calculate window edge for telemetry purposes.
+  # Uses eviction version directly instead of extracting from batch for efficiency.
+  defp calculate_window_edge_for_telemetry(eviction_version, window_lag_time_μs) do
+    Version.subtract(eviction_version, window_lag_time_μs)
+  rescue
+    ArgumentError ->
+      # Underflow - return zero version
+      Version.zero()
+  end
+
+  defp calculate_lag_time_μs(window_edge_version, eviction_version) do
+    max(0, Version.distance(window_edge_version, eviction_version))
+  rescue
+    _ -> 0
   end
 
   @doc """
-  Apply transactions from the puller to the storage state.
+  Apply a batch of transactions to the storage state.
+  This is used for incremental processing to avoid large DETS writes.
+  Buffer tracking is now handled directly by IndexManager.apply_transactions.
   """
-  @spec apply_transactions_from_puller(State.t(), [binary()]) :: {:ok, State.t(), Bedrock.version()}
-  def apply_transactions_from_puller(%State{} = t, encoded_transactions) do
-    # Apply transactions to get updated index manager
-    updated_index_manager = IndexManager.apply_transactions(t.index_manager, encoded_transactions, t.database)
+  @spec apply_transactions(State.t(), [binary()]) :: {:ok, State.t(), Bedrock.version()}
+  def apply_transactions(%State{} = t, encoded_transactions) do
+    batch_size = length(encoded_transactions)
+    batch_size_bytes = Enum.sum(Enum.map(encoded_transactions, &byte_size/1))
+    start_time = System.monotonic_time(:microsecond)
+
+    {updated_index_manager, updated_database} =
+      IndexManager.apply_transactions(t.index_manager, encoded_transactions, t.database)
+
     version = updated_index_manager.current_version
 
-    # Update state with new index manager
-    state_with_transactions = %{t | index_manager: updated_index_manager}
+    duration = System.monotonic_time(:microsecond) - start_time
+    Telemetry.trace_transaction_processing_complete(batch_size, duration, batch_size_bytes)
 
-    # Advance window to handle durability and cleanup
-    case advance_window_with_persistence(state_with_transactions) do
-      {:ok, final_state} ->
-        {:ok, final_state, version}
-
-      {:error, _reason} ->
-        # Log error but continue - window advancement is important but shouldn't block transaction processing
-        # The window will be advanced on the next batch or via periodic cleanup
-        {:ok, state_with_transactions, version}
-    end
+    # Update state with both updated index manager and database
+    updated_state = %{t | index_manager: updated_index_manager, database: updated_database}
+    {:ok, updated_state, version}
   end
-
-  #
-
-  defp do_now_or_async_with_reply(nil, fun), do: fun.()
-  defp do_now_or_async_with_reply(reply_fn, fun), do: Task.start(fn -> reply_fn.(fun.()) end)
 end

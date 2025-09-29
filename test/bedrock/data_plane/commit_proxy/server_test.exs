@@ -522,36 +522,56 @@ defmodule Bedrock.DataPlane.CommitProxy.ServerTest do
         # In a properly configured system, transactions should succeed
         assert successful_commits + failed_commits == n_clients
 
-        # Verify at least one batch processing event occurred (start or failed)
-        # This confirms the commit proxy is actually processing the transaction onslaught
-        received_event =
-          receive do
-            {:telemetry_event, [:bedrock, :data_plane, :commit_proxy, :stop], measurements, _metadata} ->
-              assert is_integer(measurements.n_oks)
-              assert is_integer(measurements.n_aborts)
-              assert measurements.n_oks + measurements.n_aborts > 0
-              :stop_event
+        # Calculate expected number of batches based on max_per_batch (5)
+        max_per_batch = 5
+        expected_batches = div(n_clients - 1, max_per_batch) + 1
 
-            {:telemetry_event, [:bedrock, :data_plane, :commit_proxy, :failed], measurements, _metadata} ->
-              # Failed events are also fine - they show processing occurred
-              assert is_integer(measurements.n_transactions)
-              :failed_event
-          after
-            1000 ->
-              :no_event
-          end
+        # Collect all batch completion events until all batches are processed
+        {total_oks, total_aborts, completed_batches} = collect_batch_events(expected_batches, 0, 0, 0)
 
-        # Either type of event shows the commit proxy processed the transaction onslaught
-        assert received_event in [:stop_event, :failed_event],
-               "Expected batch processing telemetry event but got #{received_event}"
+        # Verify all batches completed and at least some transactions were processed
+        assert completed_batches == expected_batches,
+               "Expected #{expected_batches} batches but got #{completed_batches}"
 
-        # Drain any additional telemetry events
-        receive do
-          {:telemetry_event, _, _, _} -> :ok
-        after
-          0 -> :ok
-        end
+        # The key requirement: transactions were actually processed (not all stuck)
+        # Even if they fail, they should be counted in the totals
+        assert total_oks + total_aborts > 0,
+               "No transactions were processed (oks: #{total_oks}, aborts: #{total_aborts})"
       end
+    end
+  end
+
+  # Helper function to collect all batch completion events
+  defp collect_batch_events(0, total_oks, total_aborts, completed_batches) do
+    {total_oks, total_aborts, completed_batches}
+  end
+
+  defp collect_batch_events(remaining_batches, total_oks, total_aborts, completed_batches) do
+    receive do
+      {:telemetry_event, [:bedrock, :data_plane, :commit_proxy, :stop], measurements, _metadata} ->
+        # Successful batch completion
+        collect_batch_events(
+          remaining_batches - 1,
+          total_oks + measurements.n_oks,
+          total_aborts + measurements.n_aborts,
+          completed_batches + 1
+        )
+
+      {:telemetry_event, [:bedrock, :data_plane, :commit_proxy, :failed], measurements, _metadata} ->
+        # Failed batch - count transactions that were attempted
+        collect_batch_events(
+          remaining_batches - 1,
+          total_oks,
+          total_aborts + measurements.n_transactions,
+          completed_batches + 1
+        )
+    after
+      5000 ->
+        # Much longer safety timeout - if we hit this, something is seriously wrong
+        flunk(
+          "Timed out waiting for #{remaining_batches} batch completion events. " <>
+            "Got #{completed_batches} completed batches with #{total_oks} oks and #{total_aborts} aborts"
+        )
     end
   end
 

@@ -12,7 +12,15 @@ defmodule Bedrock.Test.Storage.Olivine.InvariantChecks do
 
   alias Bedrock.DataPlane.Storage.Olivine.Index
   alias Bedrock.DataPlane.Storage.Olivine.Index.Page
-  alias Bedrock.DataPlane.Storage.Olivine.Index.Tree
+
+  # Helper function to get all page IDs from tree in order
+  # Exclude infinity marker to avoid duplicate rightmost page
+  defp get_all_page_ids_from_tree(tree) do
+    tree
+    |> :gb_trees.to_list()
+    |> Enum.reject(fn {key, _page_id} -> key == <<0xFF, 0xFF>> end)
+    |> Enum.map(fn {_key, page_id} -> page_id end)
+  end
 
   @doc """
   Validates all invariants for an Index structure.
@@ -21,6 +29,7 @@ defmodule Bedrock.Test.Storage.Olivine.InvariantChecks do
   @spec check_all_invariants(Index.t()) :: :ok | {:error, String.t()}
   def check_all_invariants(index) do
     with :ok <- check_page_key_ordering(index),
+         :ok <- check_tree_no_duplicate_page_ids(index),
          :ok <- check_tree_ordering(index),
          :ok <- check_page_chain_integrity(index),
          :ok <- check_chain_tree_consistency(index),
@@ -83,13 +92,40 @@ defmodule Bedrock.Test.Storage.Olivine.InvariantChecks do
   end
 
   @doc """
+  Validates that the tree has no duplicate page IDs.
+  Each page should appear exactly once in the tree.
+  """
+  def check_tree_no_duplicate_page_ids(index) do
+    tree_entries = :gb_trees.to_list(index.tree)
+    page_ids = Enum.map(tree_entries, fn {_key, page_id} -> page_id end)
+    unique_page_ids = Enum.uniq(page_ids)
+
+    if length(page_ids) == length(unique_page_ids) do
+      :ok
+    else
+      duplicates = page_ids -- unique_page_ids
+
+      tree_details =
+        Enum.map(tree_entries, fn {key, page_id} ->
+          {inspect(key, base: :hex), page_id}
+        end)
+
+      {:error, "Tree has duplicate page IDs: #{inspect(duplicates)}. Tree entries: #{inspect(tree_details)}"}
+    end
+  end
+
+  @doc """
   Validates that pages in the tree are ordered by end_key in strictly ascending order.
   """
   def check_tree_ordering(index) do
-    tree_page_ids = Tree.page_ids_in_range(index.tree, <<>>, <<0xFF, 0xFF, 0xFF, 0xFF, 0xFF>>)
+    # Get tree entries excluding infinity marker to avoid duplicate rightmost page
+    tree_entries =
+      index.tree
+      |> :gb_trees.to_list()
+      |> Enum.reject(fn {key, _page_id} -> key == <<0xFF, 0xFF>> end)
 
-    tree_page_ids
-    |> Enum.map(&Map.get(index.page_map, &1))
+    tree_entries
+    |> Enum.map(fn {_key, page_id} -> Map.get(index.page_map, page_id) end)
     |> Enum.reject(&is_nil/1)
     |> Enum.map(fn {page, _next_id} -> {Page.id(page), Page.right_key(page)} end)
     |> check_ascending_end_keys()
@@ -249,7 +285,7 @@ defmodule Bedrock.Test.Storage.Olivine.InvariantChecks do
   """
   def check_chain_tree_consistency(index) do
     chain_order = get_chain_order(index)
-    tree_order = Tree.page_ids_in_range(index.tree, <<>>, <<0xFF, 0xFF, 0xFF, 0xFF, 0xFF>>)
+    tree_order = get_all_page_ids_from_tree(index.tree)
 
     if chain_order == tree_order do
       :ok
@@ -259,46 +295,17 @@ defmodule Bedrock.Test.Storage.Olivine.InvariantChecks do
   end
 
   defp get_chain_order(index) do
-    page_0_tuple = Map.get(index.page_map, 0)
-
-    cond do
-      is_nil(page_0_tuple) -> []
-      Page.empty?(elem(page_0_tuple, 0)) -> get_chain_order_from_empty_page_0(index, elem(page_0_tuple, 1))
-      true -> get_chain_order_from_data_page_0(index)
-    end
+    collect_chain_order(index.page_map, 0, [])
   end
 
-  defp get_chain_order_from_empty_page_0(index, leftmost_id) do
-    case leftmost_id do
-      0 -> []
-      _ -> collect_chain_order_safe(index, leftmost_id)
-    end
-  end
+  defp collect_chain_order(page_map, page_id, collected_page_ids) do
+    {_page, next_id} = Map.fetch!(page_map, page_id)
+    updated_collected = [page_id | collected_page_ids]
 
-  defp get_chain_order_from_data_page_0(index) do
-    collect_chain_order_safe(index, 0)
-  end
-
-  defp collect_chain_order_safe(index, start_id) do
-    case collect_chain_order(index, start_id, []) do
-      {:ok, order} -> order
-      {:error, _} -> []
-    end
-  end
-
-  defp collect_chain_order(index, current_id, order) do
-    case Map.get(index.page_map, current_id) do
-      nil ->
-        {:error, "Missing page"}
-
-      {_page, next_id} ->
-        new_order = [current_id | order]
-
-        if next_id == 0 do
-          {:ok, Enum.reverse(new_order)}
-        else
-          collect_chain_order(index, next_id, new_order)
-        end
+    if next_id == 0 do
+      Enum.reverse(updated_collected)
+    else
+      collect_chain_order(page_map, next_id, updated_collected)
     end
   end
 
@@ -370,21 +377,23 @@ defmodule Bedrock.Test.Storage.Olivine.InvariantChecks do
   Validates that tree and page_map are consistent.
   """
   def check_index_consistency(index) do
-    tree_page_ids = Tree.page_ids_in_range(index.tree, <<>>, <<0xFF, 0xFF, 0xFF, 0xFF, 0xFF>>)
+    tree_page_ids = get_all_page_ids_from_tree(index.tree)
 
-    # Get all non-empty pages from page_map (empty pages shouldn't be in tree)
-    non_empty_page_ids =
+    # Get all pages that should be in tree: non-empty pages + page 0 (always in tree even if empty)
+    tree_eligible_page_ids =
       index.page_map
-      |> Enum.reject(fn {_page_id, {page, _next_id}} -> Page.empty?(page) end)
+      |> Enum.filter(fn {page_id, {page, _next_id}} ->
+        page_id == 0 or not Page.empty?(page)
+      end)
       |> Enum.map(fn {page_id, {_page, _next_id}} -> page_id end)
 
     tree_page_set = MapSet.new(tree_page_ids)
-    map_page_set = MapSet.new(non_empty_page_ids)
+    map_page_set = MapSet.new(tree_eligible_page_ids)
 
     if MapSet.equal?(tree_page_set, map_page_set) do
       :ok
     else
-      {:error, "Tree pages #{inspect(tree_page_set)} don't match non-empty page_map pages #{inspect(map_page_set)}"}
+      {:error, "Tree pages #{inspect(tree_page_set)} don't match tree-eligible page_map pages #{inspect(map_page_set)}"}
     end
   end
 
@@ -552,7 +561,7 @@ defmodule Bedrock.Test.Storage.Olivine.InvariantChecks do
       )
     end)
 
-    tree_order = Tree.page_ids_in_range(index.tree, <<>>, <<0xFF, 0xFF, 0xFF, 0xFF, 0xFF>>)
+    tree_order = get_all_page_ids_from_tree(index.tree)
     IO.puts("Tree order: #{inspect(tree_order)}")
 
     chain_order = get_chain_order(index)

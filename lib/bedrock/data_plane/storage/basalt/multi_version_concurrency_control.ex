@@ -94,62 +94,10 @@ defmodule Bedrock.DataPlane.Storage.Basalt.MultiVersionConcurrencyControl do
             acc
           end
 
-        {:atomic, :add, key, value}, acc ->
+        {:atomic, op, key, value}, acc ->
           current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.add(current_value, value)
+          new_value = Atomics.apply_operation(op, current_value, value)
           Map.put(acc, key, new_value)
-
-        {:atomic, :min, key, value}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.min(current_value, value)
-          Map.put(acc, key, new_value)
-
-        {:atomic, :max, key, value}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.max(current_value, value)
-          Map.put(acc, key, new_value)
-
-        {:atomic, :bit_and, key, value}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.bit_and(current_value, value)
-          Map.put(acc, key, new_value)
-
-        {:atomic, :bit_or, key, value}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.bit_or(current_value, value)
-          Map.put(acc, key, new_value)
-
-        {:atomic, :bit_xor, key, value}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.bit_xor(current_value, value)
-          Map.put(acc, key, new_value)
-
-        {:atomic, :byte_min, key, value}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.byte_min(current_value, value)
-          Map.put(acc, key, new_value)
-
-        {:atomic, :byte_max, key, value}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.byte_max(current_value, value)
-          Map.put(acc, key, new_value)
-
-        {:atomic, :append_if_fits, key, value}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.append_if_fits(current_value, value)
-          Map.put(acc, key, new_value)
-
-        {:atomic, :compare_and_clear, key, expected}, acc ->
-          current_value = get_current_value_for_atomic_op(mvcc, key, version)
-          new_value = Atomics.compare_and_clear(current_value, expected)
-
-          if new_value == nil do
-            # Clear the key
-            Map.put(acc, key, nil)
-          else
-            # Keep existing value
-            Map.put(acc, key, new_value)
-          end
       end)
 
     :ets.insert(

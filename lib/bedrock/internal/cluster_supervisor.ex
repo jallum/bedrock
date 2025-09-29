@@ -15,6 +15,7 @@ defmodule Bedrock.Internal.ClusterSupervisor do
   alias Bedrock.DataPlane.Log.Tracing, as: LogTracing
   alias Bedrock.DataPlane.Resolver.Tracing, as: ResolverTracing
   alias Bedrock.DataPlane.Sequencer.Tracing, as: SequencerTracing
+  alias Bedrock.DataPlane.Storage.Olivine.Tracing, as: OlivineTracing
   alias Bedrock.DataPlane.Storage.Tracing, as: StorageTracing
   alias Bedrock.Internal.Tracing.RaftTelemetry
   alias Bedrock.Service.Foreman
@@ -117,6 +118,7 @@ defmodule Bedrock.Internal.ClusterSupervisor do
       :resolver -> start_tracing(ResolverTracing)
       :sequencer -> start_tracing(SequencerTracing)
       :storage -> start_tracing(StorageTracing)
+      :olivine -> start_tracing(OlivineTracing)
       unsupported -> Logger.warning("Unsupported tracing module: #{inspect(unsupported)}")
     end)
 

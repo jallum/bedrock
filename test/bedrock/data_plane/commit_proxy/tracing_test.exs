@@ -33,7 +33,7 @@ defmodule Bedrock.DataPlane.CommitProxy.TracingTest do
     end
 
     test "logs transaction batch completion with abort/ok counts and duration" do
-      measurements = %{n_aborts: 2, n_oks: 8, duration_us: 1500}
+      measurements = %{n_aborts: 2, n_oks: 8, duration_μs: 1500}
       metadata = %{commit_version: Version.from_integer(124)}
 
       log_output =
@@ -51,7 +51,7 @@ defmodule Bedrock.DataPlane.CommitProxy.TracingTest do
       # The original bug was that :failed expected commit_version in metadata
       # but it was actually passed in measurements
       measurements = %{
-        duration_us: 437,
+        duration_μs: 437,
         commit_version: Version.from_integer(1),
         n_transactions: 1
       }
@@ -75,7 +75,7 @@ defmodule Bedrock.DataPlane.CommitProxy.TracingTest do
     end
 
     test "traces failed event with timeout reason" do
-      measurements = %{duration_us: 1000, commit_version: Version.from_integer(42)}
+      measurements = %{duration_μs: 1000, commit_version: Version.from_integer(42)}
       metadata = %{reason: :timeout, cluster: TestCluster}
 
       log_output = capture_log(fn -> Tracing.trace(:failed, measurements, metadata) end)
@@ -86,7 +86,7 @@ defmodule Bedrock.DataPlane.CommitProxy.TracingTest do
     end
 
     test "traces failed event with log failures reason" do
-      measurements = %{duration_us: 1000, commit_version: Version.from_integer(42)}
+      measurements = %{duration_μs: 1000, commit_version: Version.from_integer(42)}
       metadata = %{reason: :log_failures, cluster: TestCluster}
 
       log_output = capture_log(fn -> Tracing.trace(:failed, measurements, metadata) end)
@@ -97,7 +97,7 @@ defmodule Bedrock.DataPlane.CommitProxy.TracingTest do
     end
 
     test "traces failed event with storage failures reason" do
-      measurements = %{duration_us: 1000, commit_version: Version.from_integer(42)}
+      measurements = %{duration_μs: 1000, commit_version: Version.from_integer(42)}
       metadata = %{reason: :storage_failures, cluster: TestCluster}
 
       log_output = capture_log(fn -> Tracing.trace(:failed, measurements, metadata) end)
@@ -115,7 +115,7 @@ defmodule Bedrock.DataPlane.CommitProxy.TracingTest do
       event_name = [:bedrock, :data_plane, :commit_proxy, :failed]
 
       measurements = %{
-        duration_us: 500,
+        duration_μs: 500,
         commit_version: Version.from_integer(99),
         n_transactions: 3
       }

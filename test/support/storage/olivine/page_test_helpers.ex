@@ -14,8 +14,13 @@ defmodule Bedrock.Test.Storage.Olivine.PageTestHelpers do
     binary = from_map(page)
     next_id = page.next_id
     version = <<0, 0, 0, 0, 0, 0, 0, 1>>
-    :ok = Database.store_page_version(database, Page.id(page), version, {binary, next_id})
-    {:ok, _updated_db} = Database.advance_durable_version(database, version, [version])
+    previous_version = Database.durable_version(database)
+    # Note: pages are now managed through the versions list instead of being stored in buffer
+    collected_pages = [%{Page.id(page) => {binary, next_id}}]
+
+    {:ok, _updated_db, _metadata} =
+      Database.advance_durable_version(database, version, previous_version, 1, collected_pages)
+
     :ok
   end
 
@@ -26,8 +31,14 @@ defmodule Bedrock.Test.Storage.Olivine.PageTestHelpers do
     # Default next_id for most test pages
     next_id = 0
     version = <<0, 0, 0, 0, 0, 0, 0, 1>>
-    :ok = Database.store_page_version(database, Page.id(page), version, {binary, next_id})
-    {:ok, _updated_db} = Database.advance_durable_version(database, version, [version])
+    previous_version = Database.durable_version(database)
+    page_id = Page.id(page)
+    # Use new optimized format: pass collected pages directly
+    collected_pages = [%{page_id => {binary, next_id}}]
+
+    {:ok, _updated_db, _metadata} =
+      Database.advance_durable_version(database, version, previous_version, 1, collected_pages)
+
     :ok
   end
 
@@ -37,14 +48,22 @@ defmodule Bedrock.Test.Storage.Olivine.PageTestHelpers do
   @spec persist_pages_batch([Page.t()], Database.t()) :: :ok
   def persist_pages_batch(pages, database) do
     version = <<0, 0, 0, 0, 0, 0, 0, 1>>
+    previous_version = Database.durable_version(database)
 
-    Enum.each(pages, fn page ->
-      binary = from_map(page)
-      next_id = if is_map(page), do: page.next_id, else: 0
-      :ok = Database.store_page_version(database, Page.id(page), version, {binary, next_id})
-    end)
+    modified_pages =
+      Enum.map(pages, fn page ->
+        binary = from_map(page)
+        next_id = if is_map(page), do: page.next_id, else: 0
+        page_id = Page.id(page)
+        {page_id, {binary, next_id}}
+      end)
 
-    {:ok, _updated_db} = Database.advance_durable_version(database, version, [version])
+    # Note: pages are now managed through the versions list instead of being stored in buffer
+    collected_pages = [Map.new(modified_pages)]
+
+    {:ok, _updated_db, _metadata} =
+      Database.advance_durable_version(database, version, previous_version, 1, collected_pages)
+
     :ok
   end
 
@@ -69,9 +88,9 @@ defmodule Bedrock.Test.Storage.Olivine.PageTestHelpers do
   @doc """
   Adds a key-version pair to a page using the real Page.apply_operations.
   """
-  @spec add_key_to_page(Page.t(), binary(), Bedrock.version()) :: Page.t()
-  def add_key_to_page(page, key, version) when is_binary(version) and byte_size(version) == 8 do
-    Page.apply_operations(page, %{key => {:set, version}})
+  @spec add_key_to_page(Page.t(), binary(), Database.locator()) :: Page.t()
+  def add_key_to_page(page, key, locator) when is_binary(locator) and byte_size(locator) == 8 do
+    Page.apply_operations(page, %{key => {:set, locator}})
   end
 
   @doc """
@@ -110,6 +129,7 @@ defmodule Bedrock.Test.Storage.Olivine.PageTestHelpers do
   Only used in tests for page persistence and deserialization testing.
   """
   @spec from_map(Page.t()) :: binary()
+  def from_map(%{key_locators: key_locators, id: id, next_id: _next_id}), do: encode_page_direct(id, key_locators)
   def from_map(%{key_versions: key_versions, id: id, next_id: _next_id}), do: encode_page_direct(id, key_versions)
 
   def from_map(binary) when is_binary(binary), do: binary
@@ -126,12 +146,12 @@ defmodule Bedrock.Test.Storage.Olivine.PageTestHelpers do
     entries_data
     |> decode_entries(key_count, [])
     |> case do
-      {:ok, key_versions} ->
+      {:ok, key_locators} ->
         {:ok,
          %{
            id: id,
            next_id: 0,
-           key_versions: key_versions
+           key_locators: key_locators
          }}
 
       error ->
@@ -142,12 +162,12 @@ defmodule Bedrock.Test.Storage.Olivine.PageTestHelpers do
   def to_map(_), do: {:error, :invalid_page}
 
   # Direct page encoding using the efficient binary approach
-  @spec encode_page_direct(Page.id(), [{binary(), Bedrock.version()}]) :: binary()
-  defp encode_page_direct(id, key_versions) do
-    key_count = length(key_versions)
+  @spec encode_page_direct(Page.id(), [{binary(), Database.locator()}]) :: binary()
+  defp encode_page_direct(id, key_locators) do
+    key_count = length(key_locators)
 
     # Encode all entries as interleaved version-key pairs
-    {entries_binary, last_key_offset} = encode_entries(key_versions, <<>>, 0)
+    {entries_binary, last_key_offset} = encode_entries(key_locators, <<>>, 0)
 
     # Calculate right key offset: header (16 bytes) + entries up to last key
     right_key_offset = 16 + last_key_offset
@@ -157,31 +177,31 @@ defmodule Bedrock.Test.Storage.Olivine.PageTestHelpers do
       entries_binary::binary>>
   end
 
-  # Encode entries as interleaved version-key pairs and track last key offset
-  @spec encode_entries([{binary(), Bedrock.version()}], binary(), non_neg_integer()) ::
+  # Encode entries as interleaved locator-key pairs and track last key offset
+  @spec encode_entries([{binary(), Database.locator()}], binary(), non_neg_integer()) ::
           {binary(), non_neg_integer()}
   defp encode_entries([], acc, last_offset), do: {acc, last_offset}
 
-  defp encode_entries([{key, version} | rest], acc, _last_offset) do
+  defp encode_entries([{key, locator} | rest], acc, _last_offset) do
     key_len = byte_size(key)
-    # version + key_len, then key starts
+    # locator + key_len, then key starts
     new_last_offset = byte_size(acc) + 8 + 2
-    entry = <<version::binary-size(8), key_len::unsigned-big-16, key::binary-size(key_len)>>
+    entry = <<locator::binary-size(8), key_len::unsigned-big-16, key::binary-size(key_len)>>
     encode_entries(rest, acc <> entry, new_last_offset)
   end
 
-  # Decode interleaved version-key entries
-  @spec decode_entries(binary(), non_neg_integer(), [{binary(), Bedrock.version()}]) ::
-          {:ok, [{binary(), Bedrock.version()}]} | {:error, :invalid_entries}
+  # Decode interleaved locator-key entries
+  @spec decode_entries(binary(), non_neg_integer(), [{binary(), Database.locator()}]) ::
+          {:ok, [{binary(), Database.locator()}]} | {:error, :invalid_entries}
   defp decode_entries(<<>>, 0, acc), do: {:ok, Enum.reverse(acc)}
 
   defp decode_entries(
-         <<version::binary-size(8), key_len::unsigned-big-16, key::binary-size(key_len), rest::binary>>,
+         <<locator::binary-size(8), key_len::unsigned-big-16, key::binary-size(key_len), rest::binary>>,
          count,
          acc
        )
        when count > 0 do
-    decode_entries(rest, count - 1, [{key, version} | acc])
+    decode_entries(rest, count - 1, [{key, locator} | acc])
   end
 
   defp decode_entries(_, count, _) when count > 0, do: {:error, :invalid_entries}

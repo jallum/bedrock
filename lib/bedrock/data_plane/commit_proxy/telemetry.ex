@@ -27,12 +27,12 @@ defmodule Bedrock.DataPlane.CommitProxy.Telemetry do
           commit_version :: Bedrock.version(),
           n_aborts :: non_neg_integer(),
           n_oks :: non_neg_integer(),
-          duration_us :: Bedrock.interval_in_us()
+          duration_μs :: Bedrock.interval_in_us()
         ) :: :ok
-  def trace_commit_proxy_batch_finished(commit_version, n_aborts, n_oks, duration_us) do
+  def trace_commit_proxy_batch_finished(commit_version, n_aborts, n_oks, duration_μs) do
     Telemetry.execute(
       [:bedrock, :data_plane, :commit_proxy, :stop],
-      %{n_oks: n_oks, n_aborts: n_aborts, duration_us: duration_us},
+      %{n_oks: n_oks, n_aborts: n_aborts, duration_μs: duration_μs},
       Map.put(trace_metadata(), :commit_version, commit_version)
     )
   end
@@ -40,14 +40,14 @@ defmodule Bedrock.DataPlane.CommitProxy.Telemetry do
   @spec trace_commit_proxy_batch_failed(
           batch :: Bedrock.DataPlane.CommitProxy.Batch.t(),
           reason :: any(),
-          duration_us :: Bedrock.interval_in_us()
+          duration_μs :: Bedrock.interval_in_us()
         ) :: :ok
-  def trace_commit_proxy_batch_failed(batch, reason, duration_us) do
+  def trace_commit_proxy_batch_failed(batch, reason, duration_μs) do
     Telemetry.execute(
       [:bedrock, :data_plane, :commit_proxy, :failed],
       %{
         n_transactions: length(batch.buffer),
-        duration_us: duration_us,
+        duration_μs: duration_μs,
         commit_version: batch.commit_version
       },
       Map.put(trace_metadata(), :reason, reason)

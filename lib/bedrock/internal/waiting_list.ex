@@ -40,7 +40,7 @@ defmodule Bedrock.Internal.WaitingList do
   """
   @spec insert(t(), version(), any(), reply_fn(), timeout_ms(), (-> integer())) ::
           {t(), timeout()}
-  def insert(map, version, data, reply_fn, timeout_ms, time_fn) do
+  def insert(map, version, data, reply_fn, timeout_ms, time_fn) when timeout_ms >= 0 do
     now = time_fn.()
     deadline = now + timeout_ms
     entry = {deadline, reply_fn, data}
@@ -100,9 +100,7 @@ defmodule Bedrock.Internal.WaitingList do
   Returns {new_map, expired_entries}.
   """
   @spec expire(t()) :: {t(), [entry()]}
-  def expire(map) do
-    expire(map, &Time.monotonic_now_in_ms/0)
-  end
+  def expire(map), do: expire(map, &Time.monotonic_now_in_ms/0)
 
   @doc """
   Expire entries past their deadline from waiting list using provided time function.
@@ -130,10 +128,7 @@ defmodule Bedrock.Internal.WaitingList do
   """
   @spec next_timeout(t()) :: timeout()
   def next_timeout(map) when map_size(map) == 0, do: :infinity
-
-  def next_timeout(map) do
-    next_timeout(map, &Time.monotonic_now_in_ms/0)
-  end
+  def next_timeout(map), do: next_timeout(map, &Time.monotonic_now_in_ms/0)
 
   @doc """
   Calculate timeout for next deadline in waiting list using provided time function.
@@ -183,8 +178,6 @@ defmodule Bedrock.Internal.WaitingList do
 
   # Split entries into expired and remaining, maintaining sort order
   defp split_expired(entries, now, expired \\ [], remaining \\ [])
-
-  defp split_expired([], _now, expired, remaining), do: {Enum.reverse(expired), Enum.reverse(remaining)}
 
   defp split_expired([{deadline, _, _} = entry | rest], now, expired, remaining) when deadline <= now,
     do: split_expired(rest, now, [entry | expired], remaining)
